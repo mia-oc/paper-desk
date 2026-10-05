@@ -74,5 +74,5 @@ export function nearest(points, ts) {
 
 export const OUTCOME_CLASS = {
   executed: "good", applied: "good", skip: "muted", no_options: "muted", rejected: "warn", exec_rejected: "warn",
-  exec_ambiguous: "warn", llm_error: "bad", invalid_output: "bad", failed: "bad", executing: "warn",
+  exec_ambiguous: "warn", model_error: "bad", invalid_output: "bad", failed: "bad", executing: "warn",
 };

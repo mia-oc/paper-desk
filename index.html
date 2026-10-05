@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://matts-mac-mini.tail4ccc1a.ts.net; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="color-scheme" content="dark">
+  <title>Paper Desk</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1220'/%3E%3Cpath d='M5 22 12 14l5 4 10-11' fill='none' stroke='%2334d3a8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="gate" class="gate">
+    <form id="login" class="card gate-card" autocomplete="off">
+      <div class="logo" aria-hidden="true"></div>
+      <h1>Paper Desk</h1>
+      <p class="muted">Private dashboard. Enter the passphrase to unlock.</p>
+      <label class="sr" for="pw">Passphrase</label>
+      <input id="pw" type="password" autocomplete="current-password" spellcheck="false" placeholder="Passphrase" required>
+      <button id="go" type="submit">Unlock</button>
+      <p id="login-msg" class="msg" role="alert" aria-live="polite"></p>
+      <p class="fine">The passphrase never leaves your browser. A derived key authorises read-only requests.</p>
+    </form>
+  </main>
+  <div id="app" hidden></div>
+  <noscript>This dashboard needs JavaScript.</noscript>
+  <script src="config.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

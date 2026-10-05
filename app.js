@@ -132,8 +132,9 @@ function table(heads, rows, empty = "Nothing here yet.") {
   return h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, heads.map(([t, r]) => h("th", { class: r ? "r" : "", text: t })))), h("tbody", {}, rows)));
 }
 function enginePill(e) {
-  const map = { running: ["good", "Live"], paused: ["warn", "Paused"], halted: ["bad", "Halted"], kill_switch: ["bad", "Kill switch"], llm_unhealthy: ["warn", "Model offline"], down: ["bad", "Engine down"] };
-  const [cls, txt] = map[e.state] || ["muted", e.state];
+  const map = { running: ["good", "Live"], paused: ["warn", "Paused"], halted: ["bad", "Halted"], kill_switch: ["bad", "Kill switch"], model_unhealthy: ["warn", "Model offline"], down: ["bad", "Engine down"] };
+  let [cls, txt] = map[e.state] || ["muted", e.state];
+  if (e.state === "running" && !(e.trusted_questions && e.trusted_questions.length)) [cls, txt] = ["warn", e.explore ? "Exploring" : "Shadow"];   // nothing validated: smallest-size trades only (explore) or none (shadow)
   const el = $("engine-pill");
   if (el) el.replaceChildren(pill(cls, txt, true));
 }
@@ -205,12 +206,12 @@ async function viewOverview() {
         h("dt", { text: "Expectancy / trade" }), h("dd", { class: `num ${sgn(s.expectancy)}`, text: s.n ? gbp(s.expectancy, 2, true) : "-" }),
         h("dt", { text: "Avg win / loss" }), h("dd", { class: "num", text: s.n ? `${gbp(s.avg_win, 0, true)} / ${gbp(s.avg_loss, 0)}` : "-" }),
         h("dt", { text: "Realised P&L" }), h("dd", { class: `num ${sgn(s.pnl)}`, text: s.n ? gbp(s.pnl, 2, true) : "-" })))));
-  out.push(h("div", { class: "grid three" }, edgePanel(ov.edge), breakdown("By playbook", ov.summary.by_playbook), breakdown("By close reason", ov.summary.by_reason)));
+  out.push(h("div", { class: "grid three" }, modelPanel(ov.model_skill, ov.engine), edgePanel(ov.edge), breakdown("By close reason", ov.summary.by_reason)));
   return out;
 }
 function bannerText(e) {
   return { down: "The trading engine is not reporting. Positions keep their server-side stop-loss and take-profit.", paused: "Entries are paused (open positions are still managed).",
-    halted: "Drawdown halt: no new entries until resumed from Telegram.", kill_switch: "Kill switch file present: no new entries.", llm_unhealthy: "Local model unavailable: entries suspended until it recovers." }[e.state] || e.state;
+    halted: "Drawdown halt: no new entries until resumed from Telegram.", kill_switch: "Kill switch file present: no new entries.", model_unhealthy: "Decision model unavailable: entries suspended until it recovers." }[e.state] || e.state;
 }
 function edgePanel(edge) {
   const v = edge.verdict, cls = v.startsWith("positive") ? "good" : v.includes("NEGATIVE") ? "bad" : "muted";
@@ -221,6 +222,19 @@ function edgePanel(edge) {
   return panel("Is the model adding value?", h("div", { class: `verdict ${cls}`, text: v }),
     table([["Horizon"], ["Picks", 1], ["Mean (ATR)", 1], ["95% CI", 1], ["Hit", 1]], rows),
     h("p", { class: "fine", text: "Forward move after each directional pick, in M5-ATRs, net of spread. Skipped ideas are excluded. Profit alone is not proof of skill." }));
+}
+function modelPanel(ms, eng) {
+  const trusted = (eng && eng.trusted_questions) || [];
+  const live = trusted.length > 0;
+  const rows = Object.entries(ms.questions).map(([k, q]) => h("tr", {}, h("td", { text: k.replace("win_", "").replace("_", " ").toLowerCase() }), num_td(String(q.n)),
+    num_td(q.auc ? num(q.auc, 3) : "-", q.auc ? (q.auc >= 0.54 ? "pos" : q.auc <= 0.46 ? "neg" : "") : ""), num_td(num(q.mean_r, 2), sgn(q.mean_r)),
+    num_td(q.quintile_mean_r ? q.quintile_mean_r.map((x) => (x >= 0 ? "+" : "") + num(x, 2)).join(" ") : "-"),
+    h("td", {}, pill(trusted.includes(k) ? "good" : "muted", trusted.includes(k) ? "trades" : "shadow"))));
+  return panel("Does the decision model have skill?",
+    h("div", { class: `verdict ${live ? "good" : "muted"}`, text: live ? `LIVE on ${trusted.length} validated question(s)` : (eng && eng.explore ? "EXPLORING: nothing validated yet, so only smallest-size trades where the calibrated edge clears the bar" : "SHADOW: scoring and measuring, no trades until validated") }),
+    h("p", { class: "fine", text: `${ms.verdict}. ${num(ms.labelled, 0)} outcomes labelled, ${num(ms.pending, 0)} pending.` }),
+    table([["Question"], ["N", 1], ["AUC", 1], ["Mean R", 1], ["R by raw-prob quintile", 1], ["Status"]], rows, "Waiting for labelled outcomes…"),
+    h("p", { class: "fine", text: "Laya answers: will this trade hit its target before its stop? AUC 0.5 = no skill. Quintile R should rise from left to right if the probabilities mean anything." }));
 }
 function breakdown(title, groups) {
   const rows = Object.entries(groups).sort((a, b) => b[1].pnl - a[1].pnl).map(([k, v]) => h("tr", {}, h("td", { text: k }), num_td(String(v.n)), num_td(pct(v.win_rate * 100, 0, false)), num_td(gbp(v.pnl, 0, true), sgn(v.pnl))));
@@ -298,7 +312,7 @@ async function viewMarket() {
       num_td(pct(m.chg["1h"], 2), sgn(m.chg["1h"])), num_td(pct(m.chg["1d"], 2), sgn(m.chg["1d"])), num_td(num(m.spread_pips, 1)), h("td", {}, (m.tags || []).map((t) => span("chip", t))));
   });
   return [panel("Market scanner", table([["Instrument"], ["Price", 1], ["Interest"], ["M5 H1 D"], ["RSI M5/H1", 1], ["1h", 1], ["1d", 1], ["Spread (p)", 1], ["Signals"]], rows, "Waiting for the first scan…"),
-    h("p", { class: "fine", text: "Interest is a deterministic 0-100 score that decides which instruments the model gets to look at." }))];
+    h("p", { class: "fine", text: "Interest is a deterministic 0-100 score that decides which instruments the decision model gets to score." }))];
 }
 
 async function viewSystem() {
@@ -313,9 +327,10 @@ async function viewSystem() {
       h("dt", { text: "Model" }), h("dd", { text: e.model || "-" }), h("dt", { text: "Started" }), h("dd", { text: ago(e.started_at) }),
       h("dt", { text: "Instruments" }), h("dd", { class: "num", text: String(e.instruments ?? "-") }), h("dt", { text: "Price updates" }), h("dd", { class: "num", text: num(e.stream_msgs ?? 0, 0) }),
       h("dt", { text: "Queue" }), h("dd", { class: "num", text: String(e.queue ?? "-") }), h("dt", { text: "Database" }), h("dd", { class: "num", text: `${num(s.db_bytes / 1048576, 1)} MB` }))),
-    panel("Local model", h("dl", { class: "kv" },
-      h("dt", { text: "Latency p50" }), h("dd", { class: "num", text: s.llm.p50_ms ? `${(s.llm.p50_ms / 1000).toFixed(1)}s` : "-" }), h("dt", { text: "Latency p95" }), h("dd", { class: "num", text: s.llm.p95_ms ? `${(s.llm.p95_ms / 1000).toFixed(1)}s` : "-" }),
-      h("dt", { text: "Consecutive failures" }), h("dd", { class: "num", text: String(e.llm_failures ?? 0) }),
+    panel("Decision model (Laya, local)", h("dl", { class: "kv" },
+      h("dt", { text: "Latency p50" }), h("dd", { class: "num", text: s.model.p50_ms ? `${s.model.p50_ms} ms` : "-" }), h("dt", { text: "Latency p95" }), h("dd", { class: "num", text: s.model.p95_ms ? `${s.model.p95_ms} ms` : "-" }),
+      h("dt", { text: "Validated questions" }), h("dd", { class: "num", text: String((e.trusted_questions || []).length) }), h("dt", { text: "Calibrated" }), h("dd", { class: "num", text: e.calibrated_at || "never" }),
+      h("dt", { text: "Consecutive failures" }), h("dd", { class: "num", text: String(e.model_failures ?? 0) }),
       Object.entries(s.outcomes_24h).map(([k, v]) => [h("dt", { text: `${k} (24h)` }), h("dd", { class: "num", text: String(v) })]))),
     panel("Guardrails (enforced by code)", h("dl", { class: "kv" },
       h("dt", { text: "Risk per trade (tiers)" }), h("dd", { class: "num", text: Object.values(L.risk_pct_tiers).map((x) => `${x}%`).join(" / ") }),

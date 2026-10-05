@@ -1,13 +1,15 @@
 // Paper Desk - static, read-only dashboard. SECURITY: every dynamic value is rendered with textContent / createTextNode.
 // There is no innerHTML anywhere; the CSP additionally forbids inline script/style and third-party origins.
-import { deriveToken, gbp, pct, num, sgn, price, trunc, ago, dur, clock, chartGeometry, nearest, stepGeometry, aucBars, progress, learningHeadline, OUTCOME_CLASS } from "./lib.js";
+import { deriveToken, gbp, pct, num, sgn, price, trunc, ago, dur, clock, chartGeometry, nearest, stepGeometry, aucBars, progress, learningHeadline, exchangeStatus, briefing, OUTCOME_CLASS } from "./lib.js";
 
 const API = (window.PAPERDESK && window.PAPERDESK.api) || "";
 const REFRESH_MS = 5000;
 const SVGNS = "http://www.w3.org/2000/svg";
 const store = window.sessionStorage;           // per-tab session storage: cleared when the tab closes
 
-const state = { token: store.getItem("pd.token") || "", tab: "overview", hours: 24, timer: null, busy: false, pages: {}, open: new Set(), details: {} };
+const CLASSES = [["all", "All markets"], ["fx", "FX"], ["index", "Indices"], ["metal", "Metals"], ["energy", "Energy"], ["bond", "Bonds"]];
+const CLASSED = ["/v1/overview", "/v1/positions", "/v1/trades", "/v1/decisions", "/v1/market", "/v1/learning"];
+const state = { token: store.getItem("pd.token") || "", tab: "overview", cls: store.getItem("pd.cls") || "all", hours: 24, timer: null, busy: false, pages: {}, open: new Set(), details: {} };
 
 /* ---------------- tiny DOM helpers ---------------- */
 function h(tag, props = {}, ...kids) {
@@ -36,8 +38,12 @@ const num_td = (text, cls = "") => h("td", { class: `r num ${cls}`, text });
 /* ---------------- API ---------------- */
 class ApiError extends Error { constructor(status, retry) { super(`HTTP ${status}`); this.status = status; this.retry = retry; } }
 
+function classed(path) {
+  if (state.cls === "all" || !CLASSED.some((p) => path === p || path.startsWith(p + "?"))) return path;
+  return path + (path.includes("?") ? "&" : "?") + "class=" + encodeURIComponent(state.cls);
+}
 async function api(path) {
-  const r = await fetch(API + path, { headers: { Authorization: `Bearer ${state.token}` }, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" });
+  const r = await fetch(API + classed(path), { headers: { Authorization: `Bearer ${state.token}` }, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" });
   if (r.status === 401) { logout("Session expired. Unlock again."); throw new ApiError(401); }
   if (r.status === 429) throw new ApiError(429, Number(r.headers.get("Retry-After") || 30));
   if (!r.ok) throw new ApiError(r.status);
@@ -78,25 +84,52 @@ function wireGate() {
   });
 }
 
+/* ---------------- theme ---------------- */
+function applyTheme(t) { document.documentElement.setAttribute("data-theme", t); store.setItem("pd.theme", t); }
+applyTheme(store.getItem("pd.theme") || "light");
+
 /* ---------------- shell ---------------- */
-const TABS = [["overview", "Overview"], ["positions", "Positions"], ["trades", "Trades"], ["decisions", "Decisions"], ["market", "Market"], ["learning", "Learning"], ["system", "System"]];
+const TABS = [["overview", "Overview"], ["positions", "Positions"], ["trades", "Trades"], ["decisions", "Decisions"], ["market", "Markets"], ["learning", "Learning"], ["system", "System"]];
 
 function startApp() {
   $("gate").hidden = true;
   const app = $("app");
   app.hidden = false;
   app.replaceChildren(
-    h("header", { class: "top" },
-      h("div", { class: "brand" }, h("div", { class: "logo" }), "Paper Desk"),
+    h("header", { class: "mast" },
+      h("div", { class: "mast-top" },
+        h("h1", { class: "title" }, h("small", { text: "Paper trading · read-only" }), "The Paper Desk"),
+        h("div", { class: "spacer" }),
+        h("div", { class: "dateline", id: "dateline" }),
+        h("div", { class: "tools" }, h("span", { id: "engine-pill" }),
+          h("button", { class: "ghost", id: "theme", onclick: () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark") }, "Light / Dark"),
+          h("button", { class: "ghost", id: "lock", onclick: () => logout("") }, "Lock"))),
+      h("div", { class: "sessions", id: "sessions", "aria-label": "Exchange sessions" }),
       h("nav", { class: "tabs", role: "tablist" }, TABS.map(([id, label]) =>
         h("button", { class: "tab", role: "tab", id: `tab-${id}`, "aria-selected": String(id === state.tab), onclick: () => selectTab(id) }, label))),
-      h("div", { class: "spacer" }),
-      h("span", { id: "engine-pill" }),
-      h("button", { class: "ghost", id: "lock", onclick: () => logout("") }, "Lock")),
+      h("div", { class: "filters", id: "filters", role: "group", "aria-label": "Market filter" },
+        h("span", { text: "Show " }),
+        CLASSES.map(([id, label]) => h("button", { "data-cls": id, "aria-pressed": String(state.cls === id), onclick: () => selectClass(id) }, label)))),
     h("main", { class: "wrap", id: "view" }, h("div", { class: "skeleton" })),
     h("footer", { class: "foot", id: "foot" }, "Paper trading only · read-only view"));
   clearInterval(state.timer);
   state.timer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
+  tickMasthead();
+  refresh();
+}
+function tickMasthead() {
+  const now = Date.now(), dl = $("dateline"), ss = $("sessions");
+  if (!dl || !ss) return;
+  dl.replaceChildren(h("div", { text: new Date(now).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" }) }),
+    h("div", { text: `${clock(now / 1000)} local · ${new Date(now).toISOString().slice(11, 16)} UTC` }));
+  ss.replaceChildren(...exchangeStatus(now).map((x) => h("span", { class: x.open ? "on" : "", title: x.open ? "Open" : "Closed" }, `${x.code} ${x.local} ${x.open ? "open" : "closed"}`)));
+}
+setInterval(() => { if (state.token) tickMasthead(); }, 30000);
+function selectClass(id) {
+  state.cls = id;
+  store.setItem("pd.cls", id);
+  state.pages = {};
+  for (const b of document.querySelectorAll("#filters button")) b.setAttribute("aria-pressed", String(b.dataset.cls === id));
   refresh();
 }
 function selectTab(id) {
@@ -146,23 +179,19 @@ function equityChart(points, ref) {
   const W = 800, H = 270;
   const g = chartGeometry(points, W, H, undefined, ref);
   if (!g) return h("div", { class: "empty", text: "Collecting equity data…" });
-  const up = points[points.length - 1].nav >= points[0].nav;
-  const col = up ? "#34d3a8" : "#ff6b81";
   const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Account value over time" });
-  const grad = svg("linearGradient", { id: "eqg", x1: 0, y1: 0, x2: 0, y2: 1 }, svg("stop", { offset: "0%", "stop-color": col, "stop-opacity": ".35" }), svg("stop", { offset: "100%", "stop-color": col, "stop-opacity": "0" }));
-  root.append(svg("defs", {}, grad));
   for (const t of g.ticks) {
     root.append(svg("line", { class: "grid-line", x1: g.pad.l, x2: W - g.pad.r, y1: t.y, y2: t.y }));
     const lab = svg("text", { class: "axis", x: g.pad.l - 8, y: t.y + 4, "text-anchor": "end" }); lab.textContent = gbp(t.v, 0); root.append(lab);
   }
   if (g.refY !== null) root.append(svg("line", { class: "ref", x1: g.pad.l, x2: W - g.pad.r, y1: g.refY, y2: g.refY }));
-  root.append(svg("path", { d: g.area, fill: "url(#eqg)" }), svg("path", { d: g.line, fill: "none", stroke: col, "stroke-width": 2, "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" }));
+  root.append(svg("path", { class: "eq-area", d: g.area }), svg("path", { class: "eq-line", d: g.line }));
   for (const frac of [0, .25, .5, .75, 1]) {
     const ts = g.x0 + (g.x1 - g.x0) * frac, lab = svg("text", { class: "axis", x: g.X(ts), y: H - 6, "text-anchor": frac === 0 ? "start" : frac === 1 ? "end" : "middle" });
     lab.textContent = clock(ts, g.x1 - g.x0 > 86400); root.append(lab);
   }
-  const cross = svg("line", { x1: 0, x2: 0, y1: g.pad.t, y2: H - g.pad.b, stroke: "rgba(230,236,248,.35)", visibility: "hidden" });
-  const dot = svg("circle", { r: 4, fill: col, stroke: "#070c17", "stroke-width": 2, visibility: "hidden" });
+  const cross = svg("line", { class: "cross", x1: 0, x2: 0, y1: g.pad.t, y2: H - g.pad.b, visibility: "hidden" });
+  const dot = svg("circle", { class: "dot", r: 4, visibility: "hidden" });
   const hit = svg("rect", { x: 0, y: 0, width: W, height: H, fill: "transparent" });
   root.append(cross, dot, hit);
   const tip = h("div", { class: "tip", hidden: true });
@@ -185,6 +214,8 @@ async function viewOverview() {
   enginePill(ov.engine);
   const a = ov.account, s = ov.summary.overall;
   const out = [];
+  const lede = briefing(ov, ln);
+  if (lede) out.push(h("p", { class: "lede", id: "lede", text: lede }));
   if (ln) out.push(learningStrip(ln, ov.engine));
   if (ov.engine.state !== "running") out.push(h("div", { class: `banner ${ov.engine.state === "down" ? "bad" : ""}`, role: "status", text: bannerText(ov.engine) }));
   if (a) {
@@ -198,7 +229,7 @@ async function viewOverview() {
   const rangeBtns = h("div", { class: "seg" }, [[6, "6h"], [24, "24h"], [168, "7d"], [720, "30d"]].map(([hrs, label]) =>
     h("button", { "aria-pressed": String(state.hours === hrs), onclick: () => { state.hours = hrs; refresh(); } }, label)));
   out.push(h("div", { class: "grid two" },
-    panel([h("span", { text: "Equity" }), h("span", { class: "spacer" }), rangeBtns], equityChart(eq.points, a ? a.reference_nav : null)),
+    panel([h("span", { text: "Account value · all markets" }), h("span", { class: "spacer" }), rangeBtns], equityChart(eq.points, a ? a.reference_nav : null)),
     panel("Performance",
       h("dl", { class: "kv" },
         h("dt", { text: "Closed trades" }), h("dd", { class: "num", text: String(s.n) }),
@@ -321,7 +352,7 @@ async function viewMarket() {
   enginePill(ov.engine);
   const rows = d.instruments.sort((a, b) => b.interest - a.interest).map((m) => {
     const bar = h("span", { class: "bar" }, h("b")); bar.firstChild.style.width = `${Math.min(100, m.interest)}%`;
-    return h("tr", {}, h("td", { text: m.instrument.replace("_", "/") }), num_td(price(m.price, m.dp)), h("td", {}, bar, " ", span("num muted", num(m.interest, 0))),
+    return h("tr", {}, h("td", {}, m.instrument.replace("_", "/"), h("div", { class: "fine", text: `${m.class || ""}${m.open === null || m.open === undefined ? "" : m.open ? " · open" : " · closed"}` })), num_td(price(m.price, m.dp)), h("td", {}, bar, " ", span("num muted", num(m.interest, 0))),
       h("td", {}, arrow(m.trend.M5), arrow(m.trend.H1), arrow(m.trend.D)), num_td(`${num(m.rsi.M5, 0)} / ${num(m.rsi.H1, 0)}`),
       num_td(pct(m.chg["1h"], 2), sgn(m.chg["1h"])), num_td(pct(m.chg["1d"], 2), sgn(m.chg["1d"])), num_td(num(m.spread_pips, 1)), h("td", {}, (m.tags || []).map((t) => span("chip", t))),
       h("td", { class: "why" }, m.last_look ? [pill(OUTCOME_CLASS[m.last_look.outcome] || "muted", m.last_look.action || m.last_look.outcome || "-"), " ", span("fine", `${ago(m.last_look.ts)} · ${trunc(m.last_look.why, 70)}`)] : span("fine", "not yet scored")));
@@ -341,9 +372,9 @@ function curveChart(q, minEv) {
   root.append(svg("line", { class: "zero-line", x1: g.pad.l, x2: W - g.pad.r, y1: g.zeroY, y2: g.zeroY }));
   if (minEv > 0) root.append(svg("line", { class: "ref", x1: g.pad.l, x2: W - g.pad.r, y1: g.evY, y2: g.evY }), label(W - g.pad.r, g.evY - 4, `bar +${num(minEv, 2)}R`, "end"));
   for (const s of g.segments) {
-    const ok = s.v >= minEv && minEv > 0;
-    const bar = svg("rect", { x: s.x1, width: Math.max(0, s.x2 - s.x1), y: Math.min(s.y, g.zeroY), height: Math.abs(s.y - g.zeroY), fill: ok ? "rgba(52,211,168,.28)" : s.v >= 0 ? "rgba(91,140,255,.22)" : "rgba(255,107,129,.2)" });
-    root.append(bar, svg("line", { x1: s.x1, x2: s.x2, y1: s.y, y2: s.y, stroke: ok ? "#34d3a8" : s.v >= 0 ? "#5b8cff" : "#ff6b81", "stroke-width": 2.5 }));
+    const ok = s.v >= minEv && minEv > 0, kind = ok ? "pos" : s.v >= 0 ? "mid" : "neg";
+    const bar = svg("rect", { class: `f-${kind}`, x: s.x1, width: Math.max(0, s.x2 - s.x1), y: Math.min(s.y, g.zeroY), height: Math.abs(s.y - g.zeroY) });
+    root.append(bar, svg("line", { class: `s-${kind}`, x1: s.x1, x2: s.x2, y1: s.y, y2: s.y, "stroke-width": 2.5 }));
   }
   for (const t of g.ticks) root.append(label(t.x, H - 8, num(t.p, 2)));
   return h("div", { class: "chart" }, root);
@@ -355,7 +386,7 @@ function aucChart(items) {
   const label = (x, y, text, anchor = "middle") => { const el = svg("text", { class: "axis", x, y, "text-anchor": anchor }); el.textContent = text; return el; };
   root.append(svg("line", { class: "ref", x1: g.pad.l, x2: W - g.pad.r, y1: g.refY, y2: g.refY }), label(g.pad.l - 6, g.refY + 4, "0.50", "end"));
   for (const b of g.bars) {
-    root.append(svg("rect", { x: b.x, y: b.y, width: b.w, height: b.h, rx: 3, fill: b.above ? (b.auc >= 0.54 ? "#34d3a8" : "rgba(91,140,255,.6)") : "#ff6b81" }),
+    root.append(svg("rect", { class: b.above ? (b.auc >= 0.54 ? "c-pos" : "c-mid") : "c-neg", x: b.x, y: b.y, width: b.w, height: b.h }),
       label(b.cx, b.above ? b.y - 4 : b.y + b.h + 12, num(b.auc, 3)), label(b.cx, H - 8, clock(b.day, true).slice(0, 6)));
   }
   return h("div", { class: "chart" }, root);

@@ -118,3 +118,39 @@ export function learningHeadline(d) {
   if (t.length) return { cls: "good", text: `EARNING: ${t.join(", ")} passed held-out validation and trades at full size. Trust is re-tested every ${d.settings.learn_interval_min} minutes and withdrawn if it fades.` };
   return { cls: "muted", text: "PROVING: nothing has earned trust yet. The system keeps learning from every scan and only risks smallest-size exploration trades." };
 }
+
+/** Which home exchanges are open right now? Uses each exchange's own time zone, so daylight saving needs no tables. */
+export const EXCHANGES = [
+  { code: "TYO", name: "Tokyo", tz: "Asia/Tokyo", open: [9, 0], close: [15, 30] },
+  { code: "HKG", name: "Hong Kong", tz: "Asia/Hong_Kong", open: [9, 30], close: [16, 0] },
+  { code: "LON", name: "London", tz: "Europe/London", open: [8, 0], close: [16, 30] },
+  { code: "FRA", name: "Frankfurt", tz: "Europe/Berlin", open: [9, 0], close: [17, 30] },
+  { code: "NYC", name: "New York", tz: "America/New_York", open: [9, 30], close: [16, 0] },
+];
+export function exchangeStatus(nowMs = Date.now(), list = EXCHANGES) {
+  return list.map((x) => {
+    const parts = new Intl.DateTimeFormat("en-GB", { timeZone: x.tz, weekday: "short", hour: "numeric", minute: "numeric", hourCycle: "h23" }).formatToParts(new Date(nowMs));
+    const get = (t) => parts.find((p) => p.type === t).value;
+    const mins = Number(get("hour")) * 60 + Number(get("minute")), wd = get("weekday");
+    const o = x.open[0] * 60 + x.open[1], c = x.close[0] * 60 + x.close[1];
+    const open = !["Sat", "Sun"].includes(wd) && mins >= o && mins < c;
+    return { code: x.code, name: x.name, open, local: `${get("hour").padStart(2, "0")}:${get("minute").padStart(2, "0")}` };
+  });
+}
+
+/** One deterministic paragraph of plain English from the API payloads. No model, no randomness. */
+export function briefing(ov, ln) {
+  const a = ov && ov.account, s = ov && ov.summary && ov.summary.overall, parts = [];
+  if (a) {
+    parts.push(`The account stands at ${gbp(a.nav, 0)}, ${gbp(a.since_start, 0, true)} (${pct(a.since_start_pct)}) since the start and ${gbp(a.day_pnl, 0, true)} today.`);
+    parts.push(a.open_n ? `${a.open_n} position${a.open_n === 1 ? " is" : "s are"} open.` : "Nothing is open.");
+  }
+  if (s && s.n) parts.push(`${s.n} trade${s.n === 1 ? "" : "s"} closed so far, ${num(s.win_rate * 100, 0)}% won, averaging ${gbp(s.expectancy, 0, true)} each.`);
+  if (ln) {
+    parts.push(`The desk is taking about ${num(ln.decisions_per_min, 1)} decisions a minute.`);
+    const h = learningHeadline(ln);
+    parts.push(h.cls === "good" ? "The model has earned trust on at least one question and trades it at full size."
+      : "The model has not yet earned trust on any question, so only the smallest-size exploration runs, and only in FX; other markets are watched and scored but not traded.");
+  }
+  return parts.join(" ");
+}

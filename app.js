@@ -1,6 +1,6 @@
 // Paper Desk - static, read-only dashboard. SECURITY: every dynamic value is rendered with textContent / createTextNode.
 // There is no innerHTML anywhere; the CSP additionally forbids inline script/style and third-party origins.
-import { deriveToken, gbp, pct, num, sgn, price, trunc, ago, dur, clock, chartGeometry, nearest, OUTCOME_CLASS } from "./lib.js";
+import { deriveToken, gbp, pct, num, sgn, price, trunc, ago, dur, clock, chartGeometry, nearest, stepGeometry, aucBars, progress, learningHeadline, OUTCOME_CLASS } from "./lib.js";
 
 const API = (window.PAPERDESK && window.PAPERDESK.api) || "";
 const REFRESH_MS = 5000;
@@ -79,7 +79,7 @@ function wireGate() {
 }
 
 /* ---------------- shell ---------------- */
-const TABS = [["overview", "Overview"], ["positions", "Positions"], ["trades", "Trades"], ["decisions", "Decisions"], ["market", "Market"], ["system", "System"]];
+const TABS = [["overview", "Overview"], ["positions", "Positions"], ["trades", "Trades"], ["decisions", "Decisions"], ["market", "Market"], ["learning", "Learning"], ["system", "System"]];
 
 function startApp() {
   $("gate").hidden = true;
@@ -148,7 +148,7 @@ function equityChart(points, ref) {
   if (!g) return h("div", { class: "empty", text: "Collecting equity data…" });
   const up = points[points.length - 1].nav >= points[0].nav;
   const col = up ? "#34d3a8" : "#ff6b81";
-  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Account value over time", preserveAspectRatio: "none" });
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Account value over time" });
   const grad = svg("linearGradient", { id: "eqg", x1: 0, y1: 0, x2: 0, y2: 1 }, svg("stop", { offset: "0%", "stop-color": col, "stop-opacity": ".35" }), svg("stop", { offset: "100%", "stop-color": col, "stop-opacity": "0" }));
   root.append(svg("defs", {}, grad));
   for (const t of g.ticks) {
@@ -181,10 +181,11 @@ function equityChart(points, ref) {
 
 /* ---------------- views ---------------- */
 async function viewOverview() {
-  const [ov, eq] = await Promise.all([api("/v1/overview"), api(`/v1/equity?hours=${state.hours}`)]);
+  const [ov, eq, ln] = await Promise.all([api("/v1/overview"), api(`/v1/equity?hours=${state.hours}`), api("/v1/learning").catch(() => null)]);
   enginePill(ov.engine);
   const a = ov.account, s = ov.summary.overall;
   const out = [];
+  if (ln) out.push(learningStrip(ln, ov.engine));
   if (ov.engine.state !== "running") out.push(h("div", { class: `banner ${ov.engine.state === "down" ? "bad" : ""}`, role: "status", text: bannerText(ov.engine) }));
   if (a) {
     out.push(h("div", { class: "grid kpis" },
@@ -206,8 +207,21 @@ async function viewOverview() {
         h("dt", { text: "Expectancy / trade" }), h("dd", { class: `num ${sgn(s.expectancy)}`, text: s.n ? gbp(s.expectancy, 2, true) : "-" }),
         h("dt", { text: "Avg win / loss" }), h("dd", { class: "num", text: s.n ? `${gbp(s.avg_win, 0, true)} / ${gbp(s.avg_loss, 0)}` : "-" }),
         h("dt", { text: "Realised P&L" }), h("dd", { class: `num ${sgn(s.pnl)}`, text: s.n ? gbp(s.pnl, 2, true) : "-" })))));
-  out.push(h("div", { class: "grid three" }, modelPanel(ov.model_skill, ov.engine), edgePanel(ov.edge), breakdown("By close reason", ov.summary.by_reason)));
+  out.push(modelPanel(ov.model_skill, ov.engine));
+  out.push(h("div", { class: "grid even" }, edgePanel(ov.edge), breakdown("By close reason", ov.summary.by_reason)));
   return out;
+}
+function learningStrip(ln, eng) {
+  const last = ln.runs[0], hl = learningHeadline(ln);
+  const goTo = () => selectTab("learning");
+  return h("button", { class: `card strip ${hl.cls}`, id: "learn-strip", onclick: goTo, "aria-label": "Open the Learning tab" },
+    h("span", { class: "strip-dot" }),
+    h("span", { class: "strip-main", text: hl.text.split(":")[0] }),
+    h("span", { class: "strip-item" }, h("b", { class: "num", text: num(ln.samples.labelled, 0) }), " outcomes learned from"),
+    h("span", { class: "strip-item" }, "model ", h("b", { text: trunc(ln.model_id || "stock", 24) })),
+    h("span", { class: "strip-item" }, last ? `last learner run ${ago(last.ts)} (${last.action})` : "no learner run yet"),
+    h("span", { class: "strip-item" }, `${num(ln.decisions_per_min, 1)} decisions/min`),
+    h("span", { class: "spacer" }), h("span", { class: "strip-go", text: "Learning ›" }));
 }
 function bannerText(e) {
   return { down: "The trading engine is not reporting. Positions keep their server-side stop-loss and take-profit.", paused: "Entries are paused (open positions are still managed).",
@@ -309,10 +323,87 @@ async function viewMarket() {
     const bar = h("span", { class: "bar" }, h("b")); bar.firstChild.style.width = `${Math.min(100, m.interest)}%`;
     return h("tr", {}, h("td", { text: m.instrument.replace("_", "/") }), num_td(price(m.price, m.dp)), h("td", {}, bar, " ", span("num muted", num(m.interest, 0))),
       h("td", {}, arrow(m.trend.M5), arrow(m.trend.H1), arrow(m.trend.D)), num_td(`${num(m.rsi.M5, 0)} / ${num(m.rsi.H1, 0)}`),
-      num_td(pct(m.chg["1h"], 2), sgn(m.chg["1h"])), num_td(pct(m.chg["1d"], 2), sgn(m.chg["1d"])), num_td(num(m.spread_pips, 1)), h("td", {}, (m.tags || []).map((t) => span("chip", t))));
+      num_td(pct(m.chg["1h"], 2), sgn(m.chg["1h"])), num_td(pct(m.chg["1d"], 2), sgn(m.chg["1d"])), num_td(num(m.spread_pips, 1)), h("td", {}, (m.tags || []).map((t) => span("chip", t))),
+      h("td", { class: "why" }, m.last_look ? [pill(OUTCOME_CLASS[m.last_look.outcome] || "muted", m.last_look.action || m.last_look.outcome || "-"), " ", span("fine", `${ago(m.last_look.ts)} · ${trunc(m.last_look.why, 70)}`)] : span("fine", "not yet scored")));
   });
-  return [panel("Market scanner", table([["Instrument"], ["Price", 1], ["Interest"], ["M5 H1 D"], ["RSI M5/H1", 1], ["1h", 1], ["1d", 1], ["Spread (p)", 1], ["Signals"]], rows, "Waiting for the first scan…"),
+  return [panel("Market scanner", table([["Instrument"], ["Price", 1], ["Interest"], ["M5 H1 D"], ["RSI M5/H1", 1], ["1h", 1], ["1d", 1], ["Spread (p)", 1], ["Signals"], ["Model's last look"]], rows, "Waiting for the first scan…"),
     h("p", { class: "fine", text: "Interest is a deterministic 0-100 score that decides which instruments the decision model gets to score." }))];
+}
+
+const qname = (k) => k.replace("win_", "").replace("_", " ").toLowerCase();
+
+function curveChart(q, minEv) {
+  const W = 420, H = 210, g = stepGeometry(q.edges, q.values, W, H, minEv);
+  if (!g) return h("div", { class: "empty", text: "No curve yet." });
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Expected R by raw probability" });
+  const label = (x, y, text, anchor = "middle") => { const el = svg("text", { class: "axis", x, y, "text-anchor": anchor }); el.textContent = text; return el; };
+  for (const t of g.yticks) { root.append(svg("line", { class: "grid-line", x1: g.pad.l, x2: W - g.pad.r, y1: t.y, y2: t.y }), label(g.pad.l - 6, t.y + 4, (t.v >= 0 ? "+" : "") + num(t.v, 2), "end")); }
+  root.append(svg("line", { class: "zero-line", x1: g.pad.l, x2: W - g.pad.r, y1: g.zeroY, y2: g.zeroY }));
+  if (minEv > 0) root.append(svg("line", { class: "ref", x1: g.pad.l, x2: W - g.pad.r, y1: g.evY, y2: g.evY }), label(W - g.pad.r, g.evY - 4, `bar +${num(minEv, 2)}R`, "end"));
+  for (const s of g.segments) {
+    const ok = s.v >= minEv && minEv > 0;
+    const bar = svg("rect", { x: s.x1, width: Math.max(0, s.x2 - s.x1), y: Math.min(s.y, g.zeroY), height: Math.abs(s.y - g.zeroY), fill: ok ? "rgba(52,211,168,.28)" : s.v >= 0 ? "rgba(91,140,255,.22)" : "rgba(255,107,129,.2)" });
+    root.append(bar, svg("line", { x1: s.x1, x2: s.x2, y1: s.y, y2: s.y, stroke: ok ? "#34d3a8" : s.v >= 0 ? "#5b8cff" : "#ff6b81", "stroke-width": 2.5 }));
+  }
+  for (const t of g.ticks) root.append(label(t.x, H - 8, num(t.p, 2)));
+  return h("div", { class: "chart" }, root);
+}
+function aucChart(items) {
+  const W = 420, H = 180, g = aucBars(items, W, H);
+  if (!g) return h("div", { class: "empty", text: "Needs a day with 100+ labelled outcomes." });
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Daily AUC" });
+  const label = (x, y, text, anchor = "middle") => { const el = svg("text", { class: "axis", x, y, "text-anchor": anchor }); el.textContent = text; return el; };
+  root.append(svg("line", { class: "ref", x1: g.pad.l, x2: W - g.pad.r, y1: g.refY, y2: g.refY }), label(g.pad.l - 6, g.refY + 4, "0.50", "end"));
+  for (const b of g.bars) {
+    root.append(svg("rect", { x: b.x, y: b.y, width: b.w, height: b.h, rx: 3, fill: b.above ? (b.auc >= 0.54 ? "#34d3a8" : "rgba(91,140,255,.6)") : "#ff6b81" }),
+      label(b.cx, b.above ? b.y - 4 : b.y + b.h + 12, num(b.auc, 3)), label(b.cx, H - 8, clock(b.day, true).slice(0, 6)));
+  }
+  return h("div", { class: "chart" }, root);
+}
+function meter(label, have, need, note) {
+  const f = progress(have, need), bar = h("span", { class: "meter" }, h("b"));
+  bar.firstChild.style.width = `${f * 100}%`;
+  return h("div", { class: "meter-row" }, h("div", { class: "meter-head" }, h("span", { text: label }), h("span", { class: "num muted", text: `${num(have, 0)} / ${num(need, 0)}` })), bar, note ? h("div", { class: "fine", text: note }) : null);
+}
+const RUN_CLASS = { promoted: "good", adopted: "good", refreshed: "muted", collecting: "muted", demoted: "warn", rejected: "warn", failed: "bad", skipped: "muted" };
+
+async function viewLearning() {
+  const [d, ov] = await Promise.all([api("/v1/learning"), api("/v1/overview")]);
+  enginePill(ov.engine);
+  const hl = learningHeadline(d), cal = d.calibration, S = d.settings, last = d.runs[0];
+  const aucs = Object.values(ov.model_skill.questions || {}).map((q) => q.auc).filter((x) => x);
+  const meanAuc = aucs.length ? aucs.reduce((a, b) => a + b, 0) / aucs.length : null;
+  const trusted = cal && cal.questions ? Object.values(cal.questions).filter((q) => q.trusted).length : 0;
+  const out = [h("div", { class: `verdict ${hl.cls}`, id: "learn-verdict", text: hl.text }),
+    h("div", { class: "grid kpis" },
+      kpi("Model in use", trunc(d.model_id || "stock", 22), cal && cal.created ? `calibrated ${cal.created.slice(0, 16).replace("T", " ")}` : "no calibration"),
+      kpi("Outcomes learned", num(d.samples.labelled, 0), `${num(d.samples.pending, 0)} still maturing`),
+      kpi("Live skill (AUC)", meanAuc === null ? "-" : num(meanAuc, 3), meanAuc === null ? "needs 100+ per question" : meanAuc >= 0.54 ? "some skill" : meanAuc > 0.46 ? "indistinguishable from chance" : "inverted", meanAuc === null ? "" : meanAuc >= 0.54 ? "pos" : meanAuc <= 0.46 ? "neg" : ""),
+      kpi("Trusted questions", String(trusted), `${Object.keys((cal && cal.questions) || {}).length} measured`),
+      kpi("Last learner run", last ? ago(last.ts) : "-", last ? `${last.kind}: ${last.action}` : "none yet"))];
+  const next = Math.max(0, S.retrain_min_new_states - d.samples.new_since_retrain);
+  out.push(h("div", { class: "grid even" },
+    panel("Learning progress",
+      meter("Outcomes before first calibration", d.samples.labelled, S.learn_min_rows, "The online learner fits a calibration once enough outcomes exist."),
+      meter("New labelled scans toward the next nightly retrain", d.samples.new_since_retrain, S.retrain_min_new_states, next ? `${num(next, 0)} more needed. Retraining is tried at 03:30 and skipped if memory is tight.` : "Enough new data: the next 03:30 run will attempt a retrain."),
+      h("p", { class: "fine", text: `Last retrain: ${d.samples.last_retrain_ts ? ago(d.samples.last_retrain_ts) : "never"}. The online learner re-checks every ${S.learn_interval_min} min.` })),
+    panel("The safety rules it cannot override",
+      h("ul", { class: "rules" },
+        h("li", { text: `A question trades at full size only if, on data it has never seen, it picks at least ${S.learn_min_selected} options with mean R above zero and t ≥ ${S.learn_min_t}.` }),
+        h("li", { text: `Trust is withdrawn when fresh data stops confirming it (fewer than ${S.demote_min_n} picks, or mean R ≤ ${S.demote_mean_r}).` }),
+        h("li", { text: "A new model replaces the old one only if it measurably beats it on held-out data. Otherwise the old one stays." }),
+        h("li", { text: `Until something is trusted, only smallest-size exploration trades run, and only where expected R clears +${S.min_ev_r}.` })))));
+  const qs = Object.entries((cal && cal.questions) || {});
+  if (qs.length) out.push(h("div", { class: "grid even" }, qs.map(([k, q]) => panel([h("span", { text: `${qname(k)}: what the probability is worth` }), h("span", { class: "spacer" }), pill(q.trusted ? "good" : "muted", q.trusted ? "trades" : "shadow")],
+    curveChart(q, cal.min_ev_r || S.min_ev_r),
+    h("p", { class: "fine num", text: `Raw P(win) → expected R after spread. Held-out AUC ${q.auc === null || q.auc === undefined ? "-" : num(q.auc, 3)} · ${q.selected_n || 0} picks above the bar${q.selected_mean_r === null || q.selected_mean_r === undefined ? "" : ` · mean ${num(q.selected_mean_r, 2)}R (t=${num(q.selected_t, 1)})`}.` })))));
+  const dq = Object.entries(d.daily_auc || {});
+  out.push(panel("Is it getting better? Daily AUC of live predictions (0.50 = coin flip)", dq.length ? h("div", { class: "grid even" }, dq.map(([k, items]) => h("div", {}, h("div", { class: "fine", text: qname(k) }), aucChart(items)))) : h("div", { class: "empty", text: "Daily AUC appears once a day has 100+ labelled outcomes for a question." })));
+  const runs = d.runs.map((r) => h("tr", {}, h("td", { class: "num", text: clock(r.ts, true) }), h("td", { text: r.kind }), h("td", {}, pill(RUN_CLASS[r.action] || "muted", r.action)),
+    num_td(r.rows === null || r.rows === undefined ? "-" : num(r.rows, 0)), h("td", { text: trunc(r.model_id, 22) }), h("td", { class: "why", text: r.reason || (r.trusted.length ? `trusted: ${r.trusted.map(qname).join(", ")}` : "") })));
+  out.push(panel("Learning log", table([["When"], ["Kind"], ["Result"], ["Rows", 1], ["Model"], ["Detail"]], runs, "No learner runs yet - it starts once the engine has been up for a few minutes."),
+    h("p", { class: "fine", text: "online = refit of the calibration on live outcomes (every 30 min). retrain = nightly fine-tune of a challenger model, promoted only if it earns trust on held-out data." })));
+  return out;
 }
 
 async function viewSystem() {
@@ -340,7 +431,7 @@ async function viewSystem() {
   panel("Recent events", table([["Time"], ["Level"], ["Kind"], ["Message"]], ev, "No events."))];
 }
 
-const VIEWS = { overview: viewOverview, positions: viewPositions, trades: viewTrades, decisions: viewDecisions, market: viewMarket, system: viewSystem };
+const VIEWS = { overview: viewOverview, positions: viewPositions, trades: viewTrades, decisions: viewDecisions, market: viewMarket, learning: viewLearning, system: viewSystem };
 
 /* ---------------- boot ---------------- */
 wireGate();

@@ -1,0 +1,2 @@
+Newsreader (c) 2020 The Newsreader Project Authors, and IBM Plex Mono (c) 2017 IBM Corp., are licensed under the SIL Open Font License 1.1
+(https://openfontlicense.org). Latin subsets distributed via @fontsource. Self-hosted: the dashboard contacts no third-party font service.

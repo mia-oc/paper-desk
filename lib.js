@@ -14,16 +14,29 @@ export async function deriveToken(password, rounds = ROUNDS) {
 
 const nf = (dp) => new Intl.NumberFormat("en-GB", { minimumFractionDigits: dp, maximumFractionDigits: dp });
 export const num = (x, dp = 2) => (x === null || x === undefined || Number.isNaN(x) ? "-" : nf(dp).format(x));
-export function gbp(x, dp = 0, sign = false) {
+export function money(x, dp = 0, sign = false, sym = "£") {
   if (x === null || x === undefined || Number.isNaN(x)) return "-";
   const s = x < 0 ? "-" : sign && x > 0 ? "+" : "";
-  return `${s}£${nf(dp).format(Math.abs(x))}`;
+  return `${s}${sym}${nf(dp).format(Math.abs(x))}`;
 }
+export const gbp = (x, dp = 0, sign = false) => money(x, dp, sign, "£");
 export function pct(x, dp = 2, sign = true) {
   if (x === null || x === undefined || Number.isNaN(x)) return "-";
   return `${sign && x > 0 ? "+" : ""}${nf(dp).format(x)}%`;
 }
 export const sgn = (x) => (x > 0 ? "pos" : x < 0 ? "neg" : "flat");
+/** Short account label for tight spots: "OANDA" from "OANDA practice (FX, indices...)", "ALPACA" from "Alpaca paper (shares)". */
+export const shortName = (label) => String(label || "").split(/[\s(]/)[0].toUpperCase();
+/** Is this engine state one where the desk has no live data yet (no key / key rejected / broker down)? */
+export const WAITING = ["awaiting_credentials", "auth_failed", "unreachable", "not_started"];
+export const isWaiting = (state) => WAITING.includes(state);
+export const WAITING_TEXT = {
+  awaiting_credentials: ["Waiting for the Alpaca secret key", "The key ID is set but the secret key is not. On the Mac mini run the command below; it asks for the secret with a hidden prompt, checks it, and the desk starts by itself within seconds."],
+  auth_failed: ["Alpaca rejected the keys", "The key ID / secret pair was refused. Re-run the command below with the right pair (paper keys only)."],
+  unreachable: ["Alpaca is not reachable", "The desk will keep retrying every 15 seconds; nothing is traded meanwhile."],
+  not_started: ["This desk has not started yet", "No data has been written. Start it with scripts/install_services.sh install."],
+};
+export const CONNECT_CMD = ".venv/bin/livebot alpaca-connect";
 export const price = (x, dp) => (x === null || x === undefined ? "-" : Number(x).toFixed(dp ?? 5));
 export const trunc = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
 
@@ -139,7 +152,8 @@ export function exchangeStatus(nowMs = Date.now(), list = EXCHANGES) {
 }
 
 /** One deterministic paragraph of plain English from the API payloads. No model, no randomness. */
-export function briefing(ov, ln) {
+export function briefing(ov, ln, sym = "£") {
+  const gbp = (x, dp, sg) => money(x, dp, sg, sym);
   const a = ov && ov.account, s = ov && ov.summary && ov.summary.overall, parts = [];
   if (a) {
     parts.push(`The account stands at ${gbp(a.nav, 0)}, ${gbp(a.since_start, 0, true)} (${pct(a.since_start_pct)}) since the start and ${gbp(a.day_pnl, 0, true)} today.`);

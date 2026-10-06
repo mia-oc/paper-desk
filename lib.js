@@ -1,4 +1,5 @@
 // Pure helpers (no DOM) - unit-tested with node, shared with app.js.
+import { questionName } from "./plain.js";
 export const SALT = "oandabot-dash/v1";
 export const ROUNDS = 600000;
 
@@ -125,11 +126,11 @@ export const progress = (have, need) => (need > 0 ? Math.max(0, Math.min(1, (hav
 
 /** One-line plain-English status for the learning loop, from the /v1/learning payload. */
 export function learningHeadline(d) {
-  if (!d || !d.calibration || !d.calibration.present) return { cls: "muted", text: "COLLECTING: no calibration yet. The model scores everything and every outcome is recorded." };
+  if (!d || !d.calibration || !d.calibration.present) return { cls: "muted", text: "Gathering data: no track record yet. The model scores everything and every result is recorded." };
   const qs = Object.entries(d.calibration.questions || {});
-  const t = qs.filter(([, q]) => q.trusted).map(([k]) => k.replace("win_", "").replace("_", " ").toLowerCase());
-  if (t.length) return { cls: "good", text: `EARNING: ${t.join(", ")} passed held-out validation and trades at full size. Trust is re-tested every ${d.settings.learn_interval_min} minutes and withdrawn if it fades.` };
-  return { cls: "muted", text: "PROVING: nothing has earned trust yet. The system keeps learning from every scan and only risks smallest-size exploration trades." };
+  const t = qs.filter(([, q]) => q.trusted).map(([k]) => questionName(k).toLowerCase());
+  if (t.length) return { cls: "good", text: `Proven: ${t.join(", ")} passed the test on data the model had never seen, so it trades at full size. That is re-checked every ${d.settings.learn_interval_min} minutes and withdrawn if it stops holding up.` };
+  return { cls: "muted", text: "Still proving itself: no kind of trade has passed the test yet. It keeps learning from every scan and only places smallest-size trial trades." };
 }
 
 /** Which home exchanges are open right now? Uses each exchange's own time zone, so daylight saving needs no tables. */
@@ -161,10 +162,10 @@ export function briefing(ov, ln, sym = "£") {
   }
   if (s && s.n) parts.push(`${s.n} trade${s.n === 1 ? "" : "s"} closed so far, ${num(s.win_rate * 100, 0)}% won, averaging ${gbp(s.expectancy, 0, true)} each.`);
   if (ln) {
-    parts.push(`The desk is taking about ${num(ln.decisions_per_min, 1)} decisions a minute.`);
+    parts.push(`The desk is making about ${num(ln.decisions_per_min, 1)} decisions a minute.`);
     const h = learningHeadline(ln);
-    parts.push(h.cls === "good" ? "The model has earned trust on at least one question and trades it at full size."
-      : "The model has not yet earned trust on any question, so only the smallest-size exploration runs, and only in FX; other markets are watched and scored but not traded.");
+    parts.push(h.cls === "good" ? "The model has proven itself on at least one kind of trade and trades it at full size."
+      : "The model has not yet proven itself on any kind of trade, so only smallest-size trial trades run while it keeps learning.");
   }
   return parts.join(" ");
 }

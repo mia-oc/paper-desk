@@ -1,3 +1,3 @@
 # Paper Desk
-Static, read-only dashboard for a private OANDA *paper*-trading bot. No secrets live in this repo: data is fetched at runtime
-from a key-protected API, and a passphrase (never stored here) unlocks it. Built from `scripts/build_dashboard.py`.
+Static, read-only dashboard for a *paper*-trading bot (OANDA practice + Alpaca paper; no real money). No secrets live in this repo: data is fetched at runtime
+from a read-only, rate-limited API. Built from `scripts/build_dashboard.py`.

@@ -3,6 +3,7 @@
 import { deriveToken, money, pct, num, sgn, price, trunc, ago, dur, clock, chartGeometry, nearest, stepGeometry, aucBars, progress, learningHeadline, exchangeStatus, shortName, isWaiting, WAITING_TEXT, CONNECT_CMD, OUTCOME_CLASS } from "./lib.js";
 
 const API = (window.PAPERDESK && window.PAPERDESK.api) || "";
+let OPEN = !!(window.PAPERDESK && window.PAPERDESK.open === true);        // paper-only deploy: the read-only API needs no passphrase (falls back to the gate if it answers 401)
 const REFRESH_MS = 5000;
 const TAPE_MS = 15000;
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -10,7 +11,7 @@ const store = window.sessionStorage;           // per-tab session storage: clear
 
 const CLASSES = [["all", "All"], ["fx", "FX"], ["index", "Indices"], ["metal", "Metals"], ["energy", "Energy"], ["bond", "Bonds"]];
 const CLASSED = ["/v1/overview", "/v1/positions", "/v1/trades", "/v1/decisions", "/v1/market", "/v1/learning"];
-const state = { token: store.getItem("pd.token") || "", tab: "overview", cls: store.getItem("pd.cls") || "all", acct: store.getItem("pd.acct") || "", accounts: [], hours: 24,
+const state = { token: OPEN ? "open" : store.getItem("pd.token") || "", tab: "overview", cls: store.getItem("pd.cls") || "all", acct: store.getItem("pd.acct") || "", accounts: [], hours: 24,
   timer: null, busy: false, pages: {}, open: new Set(), details: {}, tapeAt: 0, tapeKey: "" };
 
 /* ---------------- accounts (one per broker desk) ---------------- */
@@ -59,7 +60,7 @@ function withParams(path, account) {
   return params.length ? path + (path.includes("?") ? "&" : "?") + params.join("&") : path;
 }
 async function api(path, account = "") {
-  const r = await fetch(API + withParams(path, account), { headers: { Authorization: `Bearer ${state.token}` }, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" });
+  const r = await fetch(API + withParams(path, account), { headers: OPEN ? {} : { Authorization: `Bearer ${state.token}` }, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" });
   if (r.status === 401) { logout("Session expired. Unlock again."); throw new ApiError(401); }
   if (r.status === 429) throw new ApiError(429, Number(r.headers.get("Retry-After") || 30));
   if (!r.ok) throw new ApiError(r.status);
@@ -77,6 +78,7 @@ async function login(password) {
   store.setItem("pd.token", token);
 }
 function logout(msg = "") {
+  OPEN = false;                                                               // the API wants a passphrase after all
   state.token = "";
   store.removeItem("pd.token");
   clearInterval(state.timer);
@@ -121,7 +123,7 @@ function startApp() {
           h("div", { class: "clockbox num", id: "clockbox" }),
           h("span", { id: "engine-pill" }),
           h("button", { class: "ghost", id: "theme", onclick: () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark") }, "Theme"),
-          h("button", { class: "ghost", id: "lock", onclick: () => logout("") }, "Lock"))),
+          OPEN ? null : h("button", { class: "ghost", id: "lock", onclick: () => logout("") }, "Lock"))),
       h("div", { class: "bar2" },
         h("nav", { class: "tabs", role: "tablist" }, TABS.map(([id, label]) =>
           h("button", { class: "tab", role: "tab", id: `tab-${id}`, "aria-selected": String(id === state.tab), onclick: () => selectTab(id) }, label))),

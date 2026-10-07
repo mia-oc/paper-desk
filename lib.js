@@ -169,3 +169,37 @@ export function briefing(ov, ln, sym = "£") {
   }
   return parts.join(" ");
 }
+
+/** "2h 10m", "35m", "3d 4h": a countdown in plain words. */
+export function untilText(ts, nowSec = Date.now() / 1000) {
+  if (!ts) return "-";
+  const m = Math.round((ts - nowSec) / 60);
+  if (m <= 0) return "now";
+  if (m < 90) return `${m}m`;
+  if (m < 48 * 60) return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+  return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+}
+/** "Tue 14:30" in the viewer's own time zone (the page says "your time"). */
+export function whenText(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts * 1000);
+  return `${d.toLocaleDateString("en-GB", { weekday: "short" })} ${d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+}
+/** The exchange clock from /v1/overview -> {open, headline, detail}. */
+export function sessionLine(c, nowSec = Date.now() / 1000) {
+  if (!c) return null;
+  if (c.is_open) return { open: true, headline: "The US stock market is open", detail: c.next_close ? `Closes in ${untilText(c.next_close, nowSec)} (${whenText(c.next_close)} your time).` : "" };
+  return { open: false, headline: "The US stock market is closed", detail: c.next_open ? `Opens in ${untilText(c.next_open, nowSec)} (${whenText(c.next_open)} your time). Nothing new is bought or sold until then.` : "" };
+}
+/** "2026-10-06" -> "Tue 06 Oct" (calendar day label for the daily results table). */
+export function dayLabel(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+  if (!m) return String(iso || "-");
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return `${d.toLocaleDateString("en-GB", { weekday: "short", timeZone: "UTC" })} ${m[3]} ${d.toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" })}`;
+}
+/** Keep the first ``head`` and last ``tail`` entries of an already-sorted list (best and worst), without repeating any. */
+export function bestAndWorst(entries, head = 6, tail = 6) {
+  if (entries.length <= head + tail) return { shown: entries, hidden: 0 };
+  return { shown: [...entries.slice(0, head), ...entries.slice(-tail)], hidden: entries.length - head - tail };
+}

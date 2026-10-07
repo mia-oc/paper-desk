@@ -1,7 +1,7 @@
 // Paper Desk - static, read-only dashboard. SECURITY: every dynamic value is rendered with textContent / createTextNode.
 // There is no innerHTML anywhere; the CSP additionally forbids inline script/style and third-party origins.
 import { choiceName, questionName, learnReasonText, styleName, sideName, decisionType, outcomeText, closeReasonText, rejectText, tagText, className, eventText, runKindText, runActionText, engineMode, whyText, edgeVerdictText, skillVerdictText } from "./plain.js";
-import { deriveToken, money, pct, num, sgn, price, trunc, ago, dur, clock, chartGeometry, nearest, stepGeometry, aucBars, progress, learningHeadline, exchangeStatus, shortName, isWaiting, WAITING_TEXT, CONNECT_CMD, OUTCOME_CLASS } from "./lib.js";
+import { deriveToken, money, pct, num, sgn, price, trunc, ago, dur, clock, chartGeometry, nearest, stepGeometry, aucBars, progress, learningHeadline, exchangeStatus, shortName, isWaiting, WAITING_TEXT, CONNECT_CMD, OUTCOME_CLASS, untilText, sessionLine, dayLabel, bestAndWorst } from "./lib.js";
 
 const API = (window.PAPERDESK && window.PAPERDESK.api) || "";
 let OPEN = !!(window.PAPERDESK && window.PAPERDESK.open === true);        // paper-only deploy: the read-only API needs no passphrase (falls back to the gate if it answers 401)
@@ -12,16 +12,27 @@ const store = window.sessionStorage;           // per-tab session storage: clear
 
 const CLASSES = [["all", "All"], ["fx", "FX"], ["index", "Indices"], ["metal", "Metals"], ["energy", "Energy"], ["bond", "Bonds"]];
 const CLASSED = ["/v1/overview", "/v1/positions", "/v1/trades", "/v1/decisions", "/v1/market", "/v1/learning"];
-const state = { token: OPEN ? "open" : store.getItem("pd.token") || "", tab: "overview", cls: store.getItem("pd.cls") || "all", acct: store.getItem("pd.acct") || "", accounts: [], hours: 24,
+const state = { token: OPEN ? "open" : store.getItem("pd.token") || "", tab: "overview", cls: store.getItem("pd.cls") || "all", acct: store.getItem("pd.acct") || "both", accounts: [], hours: 24,
   timer: null, busy: false, pages: {}, open: new Set(), details: {}, tapeAt: 0, tapeKey: "" };
 
 /* ---------------- accounts (one per broker desk) ---------------- */
-const acctInfo = (id = state.acct) => state.accounts.find((a) => a.id === id) || null;
+// state.acct is "both" (every desk, one section each) or a single desk id. Drawing code never reads state.acct directly: it asks for the
+// desk being drawn (set by inDesk), so two desks can be drawn one after the other without mixing currencies or instrument names.
+let viewDesk = "";
+const deskId = () => viewDesk || (state.acct !== "both" ? state.acct : (state.accounts[0] || {}).id) || "";
+const acctInfo = (id = deskId()) => state.accounts.find((a) => a.id === id) || null;
 const acctIndex = (id) => Math.max(0, state.accounts.findIndex((a) => a.id === id));
-const sym = (id = state.acct) => (acctInfo(id) || {}).symbol || "£";
-const cur = (x, dp = 0, sign = false, id = state.acct) => money(x, dp, sign, sym(id));
+const sym = (id = deskId()) => (acctInfo(id) || {}).symbol || "£";
+const cur = (x, dp = 0, sign = false, id = deskId()) => money(x, dp, sign, sym(id));
 const isShares = () => (acctInfo() || {}).broker === "alpaca";
-const effClass = () => ((acctInfo() || {}).broker === "oanda" || !acctInfo() ? state.cls : "all");
+const scope = () => (state.acct === "both" ? state.accounts : state.accounts.filter((a) => a.id === state.acct));
+const both = () => scope().length > 1;
+const effClass = (id) => ((acctInfo(id) || {}).broker === "oanda" ? state.cls : "all");
+function inDesk(id, fn) {                                                     // synchronous drawing only: the desk is restored before anything else runs
+  const prev = viewDesk;
+  viewDesk = id;
+  try { return fn(); } finally { viewDesk = prev; }
+}
 
 /* ---------------- tiny DOM helpers ---------------- */
 function h(tag, props = {}, ...kids) {
@@ -53,9 +64,9 @@ class ApiError extends Error { constructor(status, retry) { super(`HTTP ${status
 function withParams(path, account) {
   const params = [];
   if (!path.startsWith("/v1/accounts")) {
-    const acct = account || state.acct;
+    const acct = account || deskId();
     if (acct) params.push("account=" + encodeURIComponent(acct));
-    const cls = account && account !== state.acct ? "all" : effClass();
+    const cls = effClass(acct);
     if (cls !== "all" && CLASSED.some((p) => path === p || path.startsWith(p + "?"))) params.push("class=" + encodeURIComponent(cls));
   }
   return params.length ? path + (path.includes("?") ? "&" : "?") + params.join("&") : path;
@@ -150,7 +161,9 @@ setInterval(() => { if (state.token) tickMasthead(); }, 30000);
 function renderAccounts() {
   const box = $("accts");
   if (!box) return;
-  box.replaceChildren(...state.accounts.map((a, i) => {
+  const bothBtn = state.accounts.length > 1 ? [h("button", { class: "acct both", "data-acct": "both", "aria-pressed": String(state.acct === "both"), onclick: () => selectAcct("both"), title: "Show every desk" },
+    h("span", { class: "adot" }), h("span", { class: "name", text: "Both desks" }), h("span", { class: "val sm", text: "side by side" }))] : [];
+  box.replaceChildren(...bothBtn, ...state.accounts.map((a, i) => {
     const ac = a.account, waiting = isWaiting(a.engine.state) || !ac;
     const name = [shortName(a.label), ...String(a.label).split(" ").slice(1)].join(" ");
     return h("button", { class: `acct c${i}`, "data-acct": a.id, "aria-pressed": String(a.id === state.acct), onclick: () => selectAcct(a.id), title: a.label },
@@ -159,14 +172,16 @@ function renderAccounts() {
         : h("span", { class: "val num" }, money(ac.nav, 2, false, a.symbol), h("span", { class: `chg ${sgn(ac.day_pnl)}`, text: pct(ac.day_pnl_pct, 2) })));
   }));
   const f = $("filters");
-  if (f) f.hidden = !(acctInfo() && acctInfo().broker === "oanda") ;
+  if (f) f.hidden = !scope().some((a) => a.broker === "oanda");
 }
 const waitingShort = (s) => ({ awaiting_credentials: "awaiting secret key", auth_failed: "key rejected", unreachable: "broker unreachable", not_started: "not started" }[s] || s);
 async function loadAccounts() {
   const d = await api("/v1/accounts");
   state.accounts = d.accounts;
-  if (!acctInfo()) { state.acct = d.default; store.setItem("pd.acct", state.acct); }
+  if (state.acct !== "both" && !acctInfo(state.acct)) { state.acct = "both"; store.setItem("pd.acct", state.acct); }
+  if (state.accounts.length < 2 && state.acct === "both") state.acct = state.accounts[0] ? state.accounts[0].id : "both";
   renderAccounts();
+  setPills();
 }
 function selectAcct(id) {
   if (id === state.acct) return;
@@ -198,6 +213,7 @@ async function refresh() {
     await loadAccounts();
     const content = await VIEWS[state.tab]();
     view.replaceChildren(...content);
+    setPills();
     if (state.tab === "decisions") loadDetails();
     $("foot").textContent = `Paper trading only · read-only view · updated ${clock(Date.now() / 1000)}`;
     refreshTape();
@@ -212,16 +228,20 @@ async function refresh() {
   }
 }
 
-/* watchlist tape: the selected account's most interesting instruments, refreshed more slowly than the page */
+/* watchlist tape: the most interesting instruments of the desk(s) in view, refreshed more slowly than the page */
 async function refreshTape() {
-  const a = acctInfo(), key = `${state.acct}|${effClass()}`;
-  if (!a || isWaiting(a.engine.state) || (Date.now() - state.tapeAt < TAPE_MS && state.tapeKey === key)) return;
+  const list = scope().filter((a) => !isWaiting(a.engine.state)), key = `${state.acct}|${state.cls}`;
+  if (!list.length || (Date.now() - state.tapeAt < TAPE_MS && state.tapeKey === key)) return;
   state.tapeAt = Date.now(); state.tapeKey = key;
   try {
-    const d = await api("/v1/market");
-    const items = d.instruments.filter((m) => m.price !== null && m.price !== undefined).sort((x, y) => y.interest - x.interest).slice(0, 14);
-    $("tape").replaceChildren(...items.map((m) => h("div", { class: "tk" }, h("b", { text: tickerName(m.instrument) }), h("span", { class: "tpx num", text: price(m.price, m.dp) }),
-      h("span", { class: `num ${sgn(m.chg["1d"])}`, text: pct(m.chg["1d"], 2) }))));
+    const per = list.length > 1 ? 8 : 14;
+    const groups = await Promise.all(list.map(async (a) => {
+      const d = await api("/v1/market", a.id);
+      return inDesk(a.id, () => d.instruments.filter((m) => m.price !== null && m.price !== undefined).sort((x, y) => y.interest - x.interest).slice(0, per).map((m) =>
+        h("div", { class: `tk c${acctIndex(a.id)}` }, h("b", { text: tickerName(m.instrument) }), h("span", { class: "tpx num", text: price(m.price, m.dp) }),
+          h("span", { class: `num ${sgn(m.chg["1d"])}`, text: pct(m.chg["1d"], 2) }))));
+    }));
+    $("tape").replaceChildren(...groups.flat());
   } catch { /* the tape is decoration; the page banner reports outages */ }
 }
 const tickerName = (inst) => (inst.endsWith("_USD") && isShares() ? inst.slice(0, -4) : inst.replace("_", "/"));
@@ -235,14 +255,17 @@ function table(heads, rows, empty = "Nothing here yet.") {
   if (!rows.length) return h("div", { class: "empty", text: empty });
   return h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, heads.map(([t, r]) => h("th", { class: r ? "r" : "", text: t })))), h("tbody", {}, rows)));
 }
-function enginePill(e) {
+function enginePill(e, prefix = "") {
   const map = { running: ["good", "Live"], paused: ["warn", "Paused"], halted: ["bad", "Stopped (loss limit)"], kill_switch: ["bad", "Emergency stop"], model_unhealthy: ["warn", "Model offline"], down: ["bad", "Engine down"],
     awaiting_credentials: ["warn", "Awaiting key"], auth_failed: ["bad", "Key rejected"], unreachable: ["warn", "Unreachable"], not_started: ["muted", "Not started"] };
   let [cls, txt] = map[e.state] || ["muted", e.state];
   if (e.state === "running" && !(e.trusted_questions && e.trusted_questions.length)) [cls, txt] = ["warn", engineMode(false, e.explore)];   // nothing proven yet: smallest-size trial trades (explore) or none (watch only)
-  return pill(cls, txt, true);
+  return pill(cls, prefix ? `${prefix} · ${txt}` : txt, true);
 }
-function setEnginePill(e) { const el = $("engine-pill"); if (el) el.replaceChildren(enginePill(e)); }
+function setPills() {                                                          // one status pill per desk in view (prefixed with its name when there are two)
+  const el = $("engine-pill"), list = scope();
+  if (el) el.replaceChildren(...list.map((a) => enginePill(a.engine, list.length > 1 ? shortName(a.label) : "")));
+}
 function arrow(t) { return span(`arrow ${t === "UP" ? "up" : t === "DOWN" ? "down" : "flat"}`, t === "UP" ? "▲" : t === "DOWN" ? "▼" : "–"); }
 function stat(rec) { return rec && rec.n ? `${rec.n} · ${num(rec.win_rate * 100, 0)}% · ${cur(rec.expectancy, 0, true)}/tr` : "-"; }
 
@@ -310,23 +333,36 @@ function accountPanel(a, eq) {
   return p;
 }
 
+/** One section per desk when two are shown (so every number sits under the name and currency it belongs to). */
+function deskSection(a, nodes) {
+  if (!both()) return nodes.filter(Boolean);
+  return [h("section", { class: `desk c${acctIndex(a.id)}`, "data-desk": a.id },
+    h("h2", { class: "deskhead" }, h("span", { class: "adot-t" }), h("span", { text: a.label }), h("span", { class: "fine", text: `${a.currency} · ${a.broker === "alpaca" ? "US shares, day trading" : "forex, indices, metals, energy"}` })),
+    ...nodes.filter(Boolean))];
+}
+const instCell = (p) => h("td", {}, span("side " + p.side, (isShares() && p.side === "short" ? "Short" : sideName(p.side)).toUpperCase()), " ", tickerName(p.instrument), p.name ? h("div", { class: "fine", text: p.name }) : null);
+
 async function viewOverview() {
-  const accts = state.accounts, cur_ = acctInfo();
+  const accts = state.accounts;
   const eqs = await Promise.all(accts.map((a) => (a.account && !isWaiting(a.engine.state) ? api(`/v1/equity?hours=${state.hours}`, a.id).catch(() => null) : null)));
-  setEnginePill(cur_.engine);
   const rangeBtns = h("div", { class: "seg" }, [[6, "6h"], [24, "24h"], [168, "7d"], [720, "30d"]].map(([hrs, label]) =>
     h("button", { "aria-pressed": String(state.hours === hrs), onclick: () => { state.hours = hrs; refresh(); } }, label)));
   const out = [h("div", { class: "toolrow" }, h("span", { class: "fine", text: "Both accounts · time range" }), rangeBtns),
     h("div", { class: "grid even", id: "accounts" }, accts.map((a, i) => accountPanel(a, eqs[i])))];
-  if (!cur_.account || isWaiting(cur_.engine.state)) return out;                       // nothing more to show until the desk is live
-
-  const [ov, ln, pos] = await Promise.all([api("/v1/overview"), api("/v1/learning").catch(() => null), api("/v1/positions").catch(() => ({ positions: [] }))]);
-  setEnginePill(ov.engine);
-  const s = ov.summary.overall;
-  if (ln) out.push(learningStrip(ln, ov.engine));
+  const parts = await Promise.all(scope().map((a) => overviewDesk(a)));
+  return [...out, ...parts.flat()];
+}
+async function overviewDesk(a) {
+  if (!a.account || isWaiting(a.engine.state)) return [];                      // nothing more to show until the desk is live
+  const [ov, ln, pos] = await Promise.all([api("/v1/overview", a.id), api("/v1/learning", a.id).catch(() => null), api("/v1/positions", a.id).catch(() => ({ positions: [], exposure: null }))]);
+  return inDesk(a.id, () => deskSection(a, overviewBody(a, ov, ln, pos)));
+}
+function overviewBody(a, ov, ln, pos) {
+  const s = ov.summary.overall, out = [];
+  if (ln) out.push(learningStrip(ln, ov.engine, a));
   if (ov.engine.state !== "running") out.push(h("div", { class: `banner ${ov.engine.state === "down" ? "bad" : ""}`, role: "status", text: bannerText(ov.engine) }));
   out.push(h("div", { class: "grid split" },
-    panel("Performance · " + cur_.label,
+    panel("Performance · " + a.label,
       h("dl", { class: "kv" },
         h("dt", { text: "Closed trades" }), h("dd", { class: "num", text: String(s.n) }),
         h("dt", { text: "Win rate" }), h("dd", { class: "num", text: s.n ? pct(s.win_rate * 100, 0, false) : "-" }),
@@ -335,14 +371,62 @@ async function viewOverview() {
         h("dt", { text: "Average win / loss" }), h("dd", { class: "num", text: s.n ? `${cur(s.avg_win, 0, true)} / ${cur(s.avg_loss, 0)}` : "-" }),
         h("dt", { text: "Profit/loss on closed trades" }), h("dd", { class: `num ${sgn(s.pnl)}`, text: s.n ? cur(s.pnl, 2, true) : "-" }))),
     positionsPanel(pos.positions, true)));
+  out.push(exposurePanel(pos.exposure));
+  if (ov.market_clock || ov.broker) out.push(h("div", { class: "grid even" }, sessionPanel(ov, a), brokerPanel(ov, a)));
+  out.push(resultsPanels(ov.results));
   out.push(modelPanel(ov.model_skill, ov.engine));
   out.push(h("div", { class: "grid even" }, edgePanel(ov.edge), breakdown("How trades ended", ov.summary.by_reason, closeReasonText)));
+  out.push(h("div", { class: "grid even" }, breakdown("By kind of trade", ov.summary.by_playbook, styleName), breakdown(isShares() ? "By stock" : "By instrument", ov.summary.by_instrument, tickerName, 12)));
   return out;
 }
-function learningStrip(ln, eng) {
+function sessionPanel(ov, a) {
+  const line = sessionLine(ov.market_clock, ov.ts);
+  if (!line) return h("div");
+  return panel("Stock market hours",
+    h("div", { class: `verdict ${line.open ? "good" : "muted"}`, id: `session-${a.id}`, text: line.headline }), h("p", { class: "briefing", text: line.detail }),
+    a.day_trading ? h("p", { class: "fine", text: `Day trading: every position is closed ${a.flatten_min} minutes before the close, so nothing is held overnight.${a.allow_short ? " Short selling (selling shares you do not own, to profit from a fall) is allowed." : ""}` }) : null);
+}
+function brokerPanel(ov, a) {
+  const b = ov.broker, nav = ov.account ? ov.account.nav : 0;
+  if (!b) return h("div");
+  const row = (k, v, cls = "") => [h("dt", { text: k }), h("dd", { class: `num ${cls}`, text: v })];
+  return panel("Broker account",
+    h("dl", { class: "kv", id: `broker-${a.id}` },
+      row("Account value", cur(nav, 2)), row("Cash", cur(b.cash, 2)),
+      row("Buying power", `${cur(b.buyingPower, 0)} (${num(b.multiplier, 0)}x leverage)`),
+      row("Shares held (bought)", cur(b.longMarketValue, 0)), row("Shares sold short", cur(Math.abs(b.shortMarketValue), 0)),
+      row("Short selling", b.shortingEnabled ? "Allowed" : "Not allowed"),
+      row("Day trades in the last 5 days", String(b.daytradeCount)),
+      row("Flagged as pattern day trader", b.patternDayTrader ? "Yes" : "No", b.patternDayTrader ? "neg" : ""),
+      row("Account status", b.tradingBlocked ? "Trading blocked" : String(b.status || "-").toLowerCase(), b.tradingBlocked ? "neg" : "")),
+    h("p", { class: "fine", text: `US rules flag an account that makes more than 3 day trades in 5 trading days unless it holds over ${a.symbol}25,000.${nav >= 25000 ? " This account holds more, so the limit does not apply." : " This account is below that, so the limit applies."}` }));
+}
+function exposurePanel(ex) {
+  if (!ex || !ex.n) return null;
+  const k = [kpi("Open positions", String(ex.n), `${ex.n_long} bought · ${ex.n_short} sold short`)];
+  if (ex.gross) {
+    k.push(kpi("Money in the market", cur(ex.gross, 0), `${pct(ex.gross_pct, 1, false)} of the account`),
+      kpi("Net direction", cur(ex.net, 0, true), ex.net >= 0 ? "more bought than sold short" : "more sold short than bought", sgn(ex.net)));
+  }
+  k.push(kpi("At risk if every stop-loss is hit", cur(ex.at_risk, 0), ex.at_risk_pct === null ? "" : `${pct(ex.at_risk_pct, 2, false)} of the account`));
+  if (ex.largest) k.push(kpi("Biggest position", tickerName(ex.largest.instrument), `${num(ex.largest.weight_pct, 1)}% of the account`));
+  return panel("How much is in the market", h("div", { class: "kpis", id: `exposure-${deskId()}` }, k));
+}
+function resultsPanels(res) {
+  if (!res) return null;
+  const sideRows = [["long", isShares() ? "Bought (expecting a rise)" : "Buys"], ["short", isShares() ? "Sold short (expecting a fall)" : "Sells"]].map(([k, label]) => {
+    const v = res.by_side[k];
+    return h("tr", {}, h("td", { text: label }), num_td(String(v.n)), num_td(v.n ? pct(v.win_rate * 100, 0, false) : "-"), num_td(v.n ? cur(v.pnl, 0, true) : "-", v.n ? sgn(v.pnl) : ""));
+  });
+  const dayRows = res.daily.map((d) => h("tr", {}, h("td", { text: dayLabel(d.day) }), num_td(String(d.n)), num_td(d.n ? pct(d.win_rate * 100, 0, false) : "-"), num_td(cur(d.pnl, 0, true), sgn(d.pnl))));
+  return h("div", { class: "grid even" },
+    panel("Buying versus short selling", table([["Direction"], ["Trades", 1], ["Won", 1], ["Profit/loss", 1]], sideRows, "No closed trades yet.")),
+    panel("Results by day", table([["Day"], ["Trades", 1], ["Won", 1], ["Profit/loss", 1]], dayRows, "No closed trades yet.")));
+}
+function learningStrip(ln, eng, a) {
   const last = ln.runs[0], hl = learningHeadline(ln);
   const goTo = () => selectTab("learning");
-  return h("button", { class: `strip ${hl.cls}`, id: "learn-strip", onclick: goTo, "aria-label": "Open the Learning tab" },
+  return h("button", { class: `strip ${hl.cls}`, id: `learn-strip-${a.id}`, onclick: goTo, "aria-label": "Open the Learning tab" },
     h("span", { class: "strip-dot" }),
     h("span", { class: "strip-main", text: hl.text.split(":")[0] }),
     h("span", { class: "strip-item" }, h("b", { class: "num", text: num(ln.samples.labelled, 0) }), " results learned from"),
@@ -378,92 +462,145 @@ function modelPanel(ms, eng) {
     table([["Kind of trade"], ["Samples", 1], ["Accuracy score", 1], ["Average result (R)", 1], ["Result, least to most confident", 1], ["Status"]], rows, "Waiting for results…"),
     h("p", { class: "fine", text: "For every possible trade the model estimates the chance it reaches its target before its stop. Accuracy score: 0.5 is a coin flip and 1.0 is perfect. R means multiples of the amount risked (+1R = a profit equal to the risk). The five numbers split the model's guesses from least to most confident; if its confidence means anything they should rise from left to right." }));
 }
-function breakdown(title, groups, label = (k) => k) {
-  const rows = Object.entries(groups).sort((a, b) => b[1].pnl - a[1].pnl).map(([k, v]) => h("tr", {}, h("td", { text: label(k) }), num_td(String(v.n)), num_td(pct(v.win_rate * 100, 0, false)), num_td(cur(v.pnl, 0, true), sgn(v.pnl))));
-  return panel(title, table([["Group"], ["Trades", 1], ["Won", 1], ["Profit/loss", 1]], rows, "No closed trades yet."));
+function breakdown(title, groups, label = (k) => k, max = 0) {
+  const sorted = Object.entries(groups).sort((x, y) => y[1].pnl - x[1].pnl), cut = max ? bestAndWorst(sorted, max / 2, max / 2) : { shown: sorted, hidden: 0 };
+  const rows = cut.shown.map(([k, v]) => h("tr", {}, h("td", { text: label(k) }), num_td(String(v.n)), num_td(pct(v.win_rate * 100, 0, false)), num_td(cur(v.pnl, 0, true), sgn(v.pnl))));
+  return panel(title, table([["Group"], ["Trades", 1], ["Won", 1], ["Profit/loss", 1]], rows, "No closed trades yet."),
+    cut.hidden ? h("p", { class: "fine", text: `Showing the best and worst; ${cut.hidden} more in between.` }) : null);
 }
 
 function positionsPanel(list, compact = false) {
-  const units = isShares() ? "Shares" : "Units";
+  const sh = isShares(), units = sh ? "Shares" : "Units";
   const rows = list.map((p) => {
     const frac = Math.max(0, Math.min(1, (p.r_now + 1) / 3));
     const bar = h("span", { class: "bar rbar" }, h("b", { class: p.r_now < 0 ? "neg" : "" }));
     bar.firstChild.style.width = `${frac * 100}%`;
-    const cells = [h("td", {}, span("side " + p.side, sideName(p.side).toUpperCase()), " ", tickerName(p.instrument)), num_td(num(p.units, 0))];
+    const cells = [instCell(p)];
     if (!compact) cells.push(h("td", { text: styleName(p.playbook) }));
-    cells.push(num_td(String(p.entry)), num_td(String(p.sl ?? "-")), num_td(String(p.tp ?? "-")),
-      h("td", { class: "r" }, bar, " ", span(`num ${sgn(p.r_now)}`, `${p.r_now >= 0 ? "+" : ""}${num(p.r_now, 2)}R`)), num_td(cur(p.unrealized, 2, true), sgn(p.unrealized)));
+    cells.push(num_td(num(p.units, 0)), num_td(String(p.entry)), num_td(p.price === null || p.price === undefined ? "-" : String(p.price)));
+    if (sh && !compact) cells.push(num_td(p.move_pct === null || p.move_pct === undefined ? "-" : pct(p.move_pct, 2), sgn(p.move_pct)), num_td(p.notional ? cur(p.notional, 0) : "-"), num_td(p.weight_pct === null || p.weight_pct === undefined ? "-" : pct(p.weight_pct, 1, false)));
+    if (!compact) cells.push(num_td(String(p.sl ?? "-")), num_td(String(p.tp ?? "-")));
+    cells.push(h("td", { class: "r" }, bar, " ", span(`num ${sgn(p.r_now)}`, `${p.r_now >= 0 ? "+" : ""}${num(p.r_now, 2)}R`)), num_td(cur(p.unrealized, 2, true), sgn(p.unrealized)));
     if (!compact) cells.push(num_td(`${dur(p.held_min)} / ${dur(p.max_hold_min)}`));
     return h("tr", {}, cells);
   });
-  const heads = [["Instrument"], [units, 1], ...(compact ? [] : [["Style"]]), ["Entry", 1], ["Stop-loss", 1], ["Target", 1], ["Progress (R)", 1], ["Profit/loss now", 1], ...(compact ? [] : [["Held / limit", 1]])];
-  return panel(`Open positions (${list.length})`, table(heads, rows, "No open positions."), compact ? null : h("p", { class: "fine", text: "Progress is in R, multiples of the amount risked: +1R is a profit equal to what was risked, and -1R means the stop-loss is about to be hit. A trade is closed at its limit if it has not reached the stop or target by then." }));
+  const heads = [["Instrument"], ...(compact ? [] : [["Style"]]), [units, 1], ["Entry", 1], ["Now", 1], ...(sh && !compact ? [["Move", 1], ["Value", 1], ["% of account", 1]] : []),
+    ...(compact ? [] : [["Stop-loss", 1], ["Target", 1]]), ["Progress (R)", 1], ["Profit/loss now", 1], ...(compact ? [] : [["Held / limit", 1]])];
+  return panel(`Open positions (${list.length})`, table(heads, rows, "No open positions."), compact ? null : h("p", { class: "fine", text: `Progress is in R, multiples of the amount risked: +1R is a profit equal to what was risked, and -1R means the stop-loss is about to be hit. A trade is closed at its limit if it has not reached the stop or target by then.${sh ? " Value is shares × current price; % of account is that value against the whole account." : ""}` }));
 }
 async function viewPositions() {
-  const [d, ov] = await Promise.all([api("/v1/positions"), api("/v1/overview")]);
-  setEnginePill(ov.engine);
-  return [positionsPanel(d.positions)];
+  const parts = await Promise.all(scope().map(async (a) => {
+    const d = await api("/v1/positions", a.id);
+    return inDesk(a.id, () => deskSection(a, [positionsPanel(d.positions), exposurePanel(d.exposure)]));
+  }));
+  return parts.flat();
 }
 
 async function viewTrades() {
-  const off = state.pages.trades || 0;
-  const d = await api(`/v1/trades?state=closed&limit=${50 + off}&offset=0`);
-  const rows = d.trades.map((t) => h("tr", {}, h("td", { class: "num", text: clock(t.closed_at, true) }), h("td", {}, span("side " + t.side, sideName(t.side).toUpperCase()), " ", tickerName(t.instrument)),
-    h("td", { text: styleName(t.playbook) }), num_td(num(t.units, 0)), num_td(String(t.entry)), num_td(String(t.exit ?? "-")), num_td(cur(t.pnl, 2, true), sgn(t.pnl)),
+  const parts = await Promise.all(scope().map(async (a) => {
+    const key = `trades:${a.id}`, off = state.pages[key] || 0;
+    const d = await api(`/v1/trades?state=closed&limit=${50 + off}&offset=0`, a.id);
+    return inDesk(a.id, () => deskSection(a, tradesBody(d, key, off)));
+  }));
+  return parts.flat();
+}
+function tradesBody(d, key, off) {
+  const sh = isShares();
+  const rows = d.trades.map((t) => h("tr", {}, h("td", { class: "num", text: clock(t.closed_at, true) }), instCell(t),
+    h("td", { text: styleName(t.playbook) }), num_td(num(t.units, 0)), num_td(String(t.entry)), num_td(String(t.exit ?? "-")),
+    ...(sh ? [num_td(t.notional ? cur(t.notional, 0) : "-")] : []),
+    num_td(cur(t.pnl, 2, true), sgn(t.pnl)), ...(sh ? [num_td(t.pnl_pct === null || t.pnl_pct === undefined ? "-" : pct(t.pnl_pct, 2), sgn(t.pnl_pct))] : []),
+    num_td(t.r_multiple === null || t.r_multiple === undefined ? "-" : `${t.r_multiple >= 0 ? "+" : ""}${num(t.r_multiple, 1)}R`, sgn(t.r_multiple)), num_td(dur(t.held_min)),
     h("td", {}, pill(t.close_reason === "TP" ? "good" : t.close_reason === "SL" ? "bad" : "muted", closeReasonText(t.close_reason))),
     num_td(`${num(t.mfe_r || 0, 1)} / ${num(t.mae_r || 0, 1)}`), h("td", { class: "why", text: trunc(whyText(t.why), 120) })));
-  const out = [panel(`Closed trades (${d.total})`, table([["Closed"], ["Trade"], ["Style"], [isShares() ? "Shares" : "Units", 1], ["Entry", 1], ["Exit", 1], ["Profit/loss", 1], ["Ended by"], ["Best / worst (R)", 1], ["Why it was taken"]], rows, "No closed trades yet."),
-    h("p", { class: "fine", text: "Best / worst shows how far the trade went in our favour and against us while it was open, in R (multiples of the amount risked)." }))];
-  if (d.trades.length < d.total) out.at(-1).append(h("button", { class: "ghost more", onclick: () => { state.pages.trades = off + 50; refresh(); } }, "Load more"));
+  const heads = [["Closed"], ["Trade"], ["Style"], [sh ? "Shares" : "Units", 1], ["Entry", 1], ["Exit", 1], ...(sh ? [["Value", 1]] : []), ["Profit/loss", 1], ...(sh ? [["Return", 1]] : []),
+    ["Result (R)", 1], ["Held", 1], ["Ended by"], ["Best / worst (R)", 1], ["Why it was taken"]];
+  const out = [panel(`Closed trades (${d.total})`, table(heads, rows, "No closed trades yet."),
+    h("p", { class: "fine", text: `Result (R) is the profit or loss in multiples of the amount risked. Best / worst shows how far the trade went in our favour and against us while it was open, in R.${sh ? " Return is the profit or loss as a percentage of the money put into the shares." : ""}` }))];
+  if (d.trades.length < d.total) out.at(-1).append(h("button", { class: "ghost more", onclick: () => { state.pages[key] = off + 50; refresh(); } }, "Load more"));
   return out;
 }
 
 async function viewDecisions() {
-  const kind = state.pages.kind || "all", off = state.pages.decisions || 0;
-  const d = await api(`/v1/decisions?kind=${kind}&limit=${60 + off}&offset=0`);
+  const kind = state.pages.kind || "all";
   const seg = h("div", { class: "seg" }, [["all", "All"], ["entry", "New trades"], ["manage", "Open positions"]].map(([k, l]) =>
-    h("button", { "aria-pressed": String(kind === k), onclick: () => { state.pages.kind = k; state.pages.decisions = 0; refresh(); } }, l)));
+    h("button", { "aria-pressed": String(kind === k), onclick: () => { state.pages.kind = k; for (const key of Object.keys(state.pages)) if (key.startsWith("decisions:")) state.pages[key] = 0; refresh(); } }, l)));
+  const parts = await Promise.all(scope().map(async (a) => {
+    const key = `decisions:${a.id}`, off = state.pages[key] || 0;
+    const d = await api(`/v1/decisions?kind=${kind}&limit=${60 + off}&offset=0`, a.id);
+    return inDesk(a.id, () => deskSection(a, decisionsBody(a, d, key, off)));
+  }));
+  return [h("div", { class: "toolrow" }, h("span", { class: "fine", text: "Show" }), seg), ...parts.flat()];
+}
+function decisionsBody(a, d, key, off) {
   const rows = [];
   for (const x of d.decisions) {
-    rows.push(h("tr", { class: "row", "data-id": x.id, onclick: () => toggleDetail(x.id) },
-      h("td", { class: "num", text: clock(x.ts, true) }), h("td", { text: tickerName(x.instrument) }), h("td", { text: decisionType(x.kind) }),
+    const dk = `${a.id}:${x.id}`;
+    rows.push(h("tr", { class: "row", "data-id": x.id, onclick: () => toggleDetail(dk) },
+      h("td", { class: "num", text: clock(x.ts, true) }), h("td", {}, tickerName(x.instrument), x.name ? h("div", { class: "fine", text: x.name }) : null), h("td", { text: decisionType(x.kind) }),
       h("td", { text: choiceName(x.action) }), num_td(x.size ? `size ${x.size} of 3` : "-"),
       h("td", {}, pill(OUTCOME_CLASS[x.outcome] || "muted", x.reject_reason && x.outcome === "rejected" ? `blocked: ${rejectText(x.reject_reason)}` : outcomeText(x.outcome))),
       num_td(x.fwd15 === null || x.fwd15 === undefined ? "-" : num(x.fwd15, 2), x.fwd15 ? sgn(x.fwd15) : ""), num_td(x.latency_ms ? `${(x.latency_ms / 1000).toFixed(1)}s` : "-"),
       h("td", { class: "why", text: trunc(whyText(x.why, x.kind), 190) })));
-    if (state.open.has(x.id)) rows.push(h("tr", { class: "detail", "data-detail": x.id }, h("td", { colspan: 9 }, h("pre", { id: `det-${x.id}`, text: state.details[x.id] || "Loading…" }))));
+    if (state.open.has(dk)) rows.push(h("tr", { class: "detail", "data-detail": x.id }, h("td", { colspan: 9 }, h("pre", { id: `det-${dk}`, text: state.details[dk] || "Loading…" }))));
   }
-  const out = [panel([h("span", { text: `Model decisions (${d.total})` }), h("span", { class: "spacer" }), seg],
+  const out = [panel(`Model decisions (${d.total})`,
     table([["Time"], ["Instrument"], ["Type"], ["Choice"], ["Size", 1], ["Result"], ["Price move 15 min later", 1], ["Thinking time", 1], ["Reason"]], rows, "No decisions yet."),
     h("p", { class: "fine", text: "Click a row to see exactly what the model was shown and what it answered. Price move is measured in typical 5-minute price swings (positive means the price rose). Size runs from 1 (smallest) to 3 (largest); while the model is unproven only size 1 is used." }))];
-  if (d.decisions.length < d.total) out[0].append(h("button", { class: "ghost more", onclick: () => { state.pages.decisions = off + 60; refresh(); } }, "Load more"));
+  if (d.decisions.length < d.total) out[0].append(h("button", { class: "ghost more", onclick: () => { state.pages[key] = off + 60; refresh(); } }, "Load more"));
   return out;
 }
-function toggleDetail(id) { state.open.has(id) ? state.open.delete(id) : state.open.add(id); refresh(); }
+function toggleDetail(key) { state.open.has(key) ? state.open.delete(key) : state.open.add(key); refresh(); }
 async function loadDetails() {
-  for (const id of [...state.open]) {
-    if (state.details[id]) continue;
+  for (const key of [...state.open]) {
+    if (state.details[key]) continue;
+    const [desk, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
     try {
-      const d = await api(`/v1/decisions/${id}`);
-      state.details[id] = JSON.stringify({ model_answer: d.raw, choices_offered: d.options_json, market_snapshot_shown_to_model: d.card_json, result: d.outcome, blocked_because: d.reject_reason }, null, 2);
-    } catch { state.details[id] = "Unavailable (details are kept for 7 days)."; }
-    const el = $(`det-${id}`);
-    if (el) el.textContent = state.details[id];
+      const d = await api(`/v1/decisions/${id}`, desk);
+      state.details[key] = JSON.stringify({ model_answer: d.raw, choices_offered: d.options_json, market_snapshot_shown_to_model: d.card_json, result: d.outcome, blocked_because: d.reject_reason }, null, 2);
+    } catch { state.details[key] = "Unavailable (details are kept for 7 days)."; }
+    const el = $(`det-${key}`);
+    if (el) el.textContent = state.details[key];
   }
 }
 
 async function viewMarket() {
-  const [d, ov] = await Promise.all([api("/v1/market"), api("/v1/overview")]);
-  setEnginePill(ov.engine);
+  const parts = await Promise.all(scope().map(async (a) => {
+    const [d, u] = await Promise.all([api("/v1/market", a.id), a.screen ? api("/v1/universe", a.id).catch(() => null) : null]);
+    return inDesk(a.id, () => deskSection(a, [u && u.enabled ? universePanel(u) : null, scannerPanel(d)]));
+  }));
+  return parts.flat();
+}
+function universePanel(u) {
+  const C = u.criteria, ex = Object.entries(u.pool_exchanges || {}).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${num(v, 0)}`).join(" · ");
+  const rows = [...u.active].sort((x, y) => (y.score ?? -1) - (x.score ?? -1)).map((s) => {
+    const bar = h("span", { class: "bar" }, h("b")); bar.firstChild.style.width = `${Math.min(100, s.score || 0)}%`;
+    return h("tr", {}, h("td", {}, h("b", { text: s.symbol }), s.held ? [" ", pill("good", "holding")] : null, h("div", { class: "fine", text: s.name || "" })), h("td", { text: s.exchange || "-" }),
+      num_td(s.price === null || s.price === undefined ? "-" : num(s.price, 2)), num_td(s.move_pct === null || s.move_pct === undefined ? "-" : pct(s.move_pct, 2), sgn(s.move_pct)),
+      num_td(s.spread_pct === null || s.spread_pct === undefined ? "-" : `${num(s.spread_pct, 2)}%`), h("td", {}, bar, " ", span("num muted", s.score === null || s.score === undefined ? "-" : num(s.score, 0))),
+      h("td", { text: s.shortable === null || s.shortable === undefined ? "-" : s.shortable ? "yes" : "no" }),
+      h("td", { class: "why" }, s.last_action ? [pill(OUTCOME_CLASS[s.last_outcome] || "muted", choiceName(s.last_action) !== "-" ? choiceName(s.last_action) : outcomeText(s.last_outcome)), " ", span("fine", ago(s.last_ts))] : span("fine", "not yet looked at")));
+  });
+  return panel(`Stock screen · watching ${u.active.length}`,
+    h("div", { class: "kpis", id: "universe-kpis" },
+      kpi("Candidate list", num(u.pool_size, 0), ex || "no list yet"), kpi("Watched right now", String(u.active.length), `up to ${C.active_n} · updated ${ago(u.active_ts)}`),
+      kpi("List rebuilt", ago(u.pool_ts), "once a day"), kpi("Share price range", `$${num(C.min_price, 0)} – $${num(C.max_price, 0)}`, "cheaper and dearer are skipped"),
+      kpi("Widest trading cost", `${num(C.max_spread_pct, 2)}%`, "gap between buy and sell price")),
+    table([["Stock"], ["Exchange"], ["Price", 1], ["Move today", 1], ["Trading cost", 1], ["Attention score"], ["Can sell short?"], ["Model's last look"]], rows, "The first screen has not run yet."),
+    h("p", { class: "fine", text: `Every day the desk ranks every US-listed stock by how much money changed hands and keeps the ${num(C.liquid_n, 0)} most traded. Every ${Math.round(C.refresh_s / 60)} minutes it re-scores those by today's movement, price range, unusual volume and trading cost, and watches the best ${C.active_n}. Stocks with an open position are always kept.` }));
+}
+function scannerPanel(d) {
+  const sh = isShares();
   const rows = d.instruments.sort((a, b) => b.interest - a.interest).map((m) => {
     const bar = h("span", { class: "bar" }, h("b")); bar.firstChild.style.width = `${Math.min(100, m.interest)}%`;
-    return h("tr", {}, h("td", {}, tickerName(m.instrument), h("div", { class: "fine", text: `${className(m.class)}${m.open === null || m.open === undefined ? "" : m.open ? " · open" : " · closed"}` })), num_td(price(m.price, m.dp)), h("td", {}, bar, " ", span("num muted", num(m.interest, 0))),
+    return h("tr", {}, h("td", {}, tickerName(m.instrument), h("div", { class: "fine", text: `${m.name ? m.name + " · " : ""}${className(m.class)}${m.open === null || m.open === undefined ? "" : m.open ? " · open" : " · closed"}` })), num_td(price(m.price, m.dp)), h("td", {}, bar, " ", span("num muted", num(m.interest, 0))),
       h("td", {}, arrow(m.trend.M5), arrow(m.trend.H1), arrow(m.trend.D)), num_td(`${num(m.rsi.M5, 0)} / ${num(m.rsi.H1, 0)}`),
-      num_td(pct(m.chg["1h"], 2), sgn(m.chg["1h"])), num_td(pct(m.chg["1d"], 2), sgn(m.chg["1d"])), num_td(num(m.spread_pips, 1)), h("td", {}, (m.tags || []).map((t) => span("chip", tagText(t)))),
+      num_td(pct(m.chg["1h"], 2), sgn(m.chg["1h"])), num_td(pct(m.chg["1d"], 2), sgn(m.chg["1d"])), num_td(num(m.spread_pips, 1)), ...(sh ? [h("td", { text: m.shortable === null || m.shortable === undefined ? "-" : m.shortable ? "yes" : "no" })] : []),
+      h("td", {}, (m.tags || []).map((t) => span("chip", tagText(t)))),
       h("td", { class: "why" }, m.last_look ? [pill(OUTCOME_CLASS[m.last_look.outcome] || "muted", choiceName(m.last_look.action) !== "-" ? choiceName(m.last_look.action) : outcomeText(m.last_look.outcome)), " ", span("fine", `${ago(m.last_look.ts)} · ${trunc(whyText(m.last_look.why), 110)}`)] : span("fine", "not yet looked at")));
   });
-  return [panel("Market scanner", table([["Instrument"], ["Price", 1], ["Attention score"], ["Trend: 5m · 1h · day"], ["Momentum 5m / 1h", 1], ["Last hour", 1], ["Last day", 1], [isShares() ? "Trading cost (¢)" : "Trading cost (pips)", 1], ["What is happening"], ["Model's last look"]], rows, "Waiting for the first scan…"),
-    h("p", { class: "fine", text: "The attention score (0-100) is a simple rule, not the model: it ranks which markets look most active so the model spends its time on those. Trend arrows show whether the price is rising or falling over recent minutes, the last hour and the day. Momentum is the RSI indicator: below 30 means pushed down hard, above 70 pushed up hard. Trading cost is the gap between the buy and sell price." }))];
+  return panel("Market scanner", table([["Instrument"], ["Price", 1], ["Attention score"], ["Trend: 5m · 1h · day"], ["Momentum 5m / 1h", 1], ["Last hour", 1], ["Last day", 1], [sh ? "Trading cost (¢)" : "Trading cost (pips)", 1], ...(sh ? [["Can sell short?"]] : []), ["What is happening"], ["Model's last look"]], rows, "Waiting for the first scan…"),
+    h("p", { class: "fine", text: "The attention score (0-100) is a simple rule, not the model: it ranks which markets look most active so the model spends its time on those. Trend arrows show whether the price is rising or falling over recent minutes, the last hour and the day. Momentum is the RSI indicator: below 30 means pushed down hard, above 70 pushed up hard. Trading cost is the gap between the buy and sell price." }));
 }
 
 const qname = (k) => questionName(k);
@@ -504,13 +641,18 @@ function meter(label, have, need, note) {
 const RUN_CLASS = { promoted: "good", adopted: "good", refreshed: "muted", collecting: "muted", demoted: "warn", rejected: "warn", failed: "bad", skipped: "muted" };
 
 async function viewLearning() {
-  const [d, ov] = await Promise.all([api("/v1/learning"), api("/v1/overview")]);
-  setEnginePill(ov.engine);
+  const parts = await Promise.all(scope().map(async (a) => {
+    const [d, ov] = await Promise.all([api("/v1/learning", a.id), api("/v1/overview", a.id)]);
+    return inDesk(a.id, () => deskSection(a, learningBody(d, ov)));
+  }));
+  return parts.flat();
+}
+function learningBody(d, ov) {
   const hl = learningHeadline(d), cal = d.calibration, S = d.settings, last = d.runs[0];
   const aucs = Object.values(ov.model_skill.questions || {}).map((q) => q.auc).filter((x) => x);
   const meanAuc = aucs.length ? aucs.reduce((a, b) => a + b, 0) / aucs.length : null;
   const trusted = cal && cal.questions ? Object.values(cal.questions).filter((q) => q.trusted).length : 0;
-  const out = [h("div", { class: `verdict ${hl.cls}`, id: "learn-verdict", text: hl.text }),
+  const out = [h("div", { class: `verdict ${hl.cls}`, id: `learn-verdict-${deskId()}`, text: hl.text }),
     h("div", { class: "kpis" },
       kpi("Model in use", trunc(d.model_id || "stock", 22), cal && cal.created ? `track record built ${cal.created.slice(0, 16).replace("T", " ")}` : "no track record yet"),
       kpi("Results learned from", num(d.samples.labelled, 0), `${num(d.samples.pending, 0)} still playing out`),
@@ -543,8 +685,13 @@ async function viewLearning() {
 }
 
 async function viewSystem() {
-  const [s, ov] = await Promise.all([api("/v1/system"), api("/v1/overview")]);
-  setEnginePill(ov.engine);
+  const parts = await Promise.all(scope().map(async (a) => {
+    const [s, ov] = await Promise.all([api("/v1/system", a.id), api("/v1/overview", a.id)]);
+    return inDesk(a.id, () => deskSection(a, systemBody(a, s, ov)));
+  }));
+  return parts.flat();
+}
+function systemBody(a, s, ov) {
   const e = s.engine || {}, L = s.limits;
   const ev = s.events.map((x) => h("tr", {}, h("td", { class: "num", text: clock(x.ts, true) }), h("td", {}, pill(x.level === "info" ? "muted" : x.level === "warn" ? "warn" : "bad", x.level === "info" ? "info" : x.level === "warn" ? "warning" : x.level === "critical" ? "urgent" : "error")), h("td", { text: eventText(x.kind) }), h("td", { class: "why", text: x.msg })));
   return [h("div", { class: "grid three" },
@@ -563,7 +710,10 @@ async function viewSystem() {
       h("dt", { text: "Risk per trade (size 1 / 2 / 3)" }), h("dd", { class: "num", text: Object.values(L.risk_pct_tiers).map((x) => `${x}%`).join(" / ") }),
       h("dt", { text: "Most open positions" }), h("dd", { class: "num", text: String(L.max_open) }), h("dt", { text: "Max total risk" }), h("dd", { class: "num", text: `${L.max_total_risk_pct}% of account` }),
       h("dt", { text: "Daily loss limit" }), h("dd", { class: "num", text: `${L.daily_loss_pct}%` }), h("dt", { text: "Stop trading if down" }), h("dd", { class: "num", text: `${L.drawdown_halt_pct}%` }),
-      h("dt", { text: "New trades per hour" }), h("dd", { class: "num", text: String(L.entries_per_hour) })))),
+      h("dt", { text: "New trades per hour" }), h("dd", { class: "num", text: String(L.entries_per_hour) }),
+      a.day_trading ? [h("dt", { text: "Close everything before the market closes" }), h("dd", { class: "num", text: `${a.flatten_min} min` })] : null,
+      a.broker === "alpaca" ? [h("dt", { text: "Short selling" }), h("dd", { class: "num", text: a.allow_short ? "allowed" : "off" })] : null,
+      h("dt", { text: "Kinds of assets traded" }), h("dd", { class: "num", text: a.broker === "alpaca" ? "US shares" : a.trade_classes.join(", ") })))),
   panel("Recent events", table([["Time"], ["Level"], ["What happened"], ["Details"]], ev, "No events."))];
 }
 
